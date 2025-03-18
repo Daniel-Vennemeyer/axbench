@@ -124,8 +124,29 @@ def get_random_content(seed_sentences, tokenizer, count, genres, concepts, lengt
     responses = []
     genre = genres[0] # if there are many, we pick the first one.
     dataset = seed_sentences[f"{genre}_{split}"]
-    indices = random.sample(list(range(len(dataset))), count)
+    indices = random.choices(list(range(len(dataset))), k=count)
     random_samples = dataset.select(indices)
+    responses += [sample["input"] for sample in random_samples]
+
+    for i, response in enumerate(responses):
+        response = response.strip(" .'").strip('"')
+        # during training, we don't crop otherwise it will cutoff prompts.
+        if length is not None:
+            response = tokenizer.convert_tokens_to_string(
+                tokenizer.tokenize(response)[:int(length)])
+        random_content[concepts[i//(len(responses)//len(concepts))]] += [response]        
+    return random_content
+
+def get_random_content_concept(seed_sentences, tokenizer, count, genres, concepts, length, split):
+    random_content = {concept: [] for concept in concepts}
+    responses = []
+    genre = genres[0] # if there are many, we pick the first one.
+    dataset = seed_sentences[f"{genre}_{split}"]
+    random_samples = []
+    for i in range(len(concepts)):
+        indices = random.sample(list(range(len(dataset))), k=len(dataset))
+        random_sample = dataset.select(indices)
+        random_samples += random_sample
     responses += [sample["input"] for sample in random_samples]
 
     for i, response in enumerate(responses):
