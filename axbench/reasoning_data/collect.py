@@ -116,6 +116,10 @@ for ex in tqdm(ds["train"], desc="Classifying examples"):
     # Run classification
     category = classify_reasoning_category(user_input)
 
+    # Debug: print first 100 categories
+    if next_concept_id < 100:
+        print(f"Example {next_concept_id}: {category}")
+
     # Assign stable concept ID
     if category not in concept_map:
         concept_map[category] = next_concept_id
