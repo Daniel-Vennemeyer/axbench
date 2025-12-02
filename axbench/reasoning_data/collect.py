@@ -2,6 +2,7 @@ import json
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
+from tqdm import tqdm
 
 # -----------------------------
 # Paths
@@ -107,7 +108,7 @@ next_concept_id = 0
 
 output_rows = []
 
-for ex in ds["train"]:
+for ex in tqdm(ds["train"], desc="Classifying examples"):
     # Extract messages
     chosen_msg_list = ex["chosen"]
     user_input, assistant_output = extract_user_and_assistant(chosen_msg_list)
