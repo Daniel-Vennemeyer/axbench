@@ -71,14 +71,15 @@ def classify_reasoning_category(question: str) -> str:
         outputs = llm.generate(CLASSIFICATION_PROMPT.format(question=question), sampling_params)
         return outputs[0].outputs[0].text.strip()
 
-    inputs = tokenizer.apply_chat_template(
+    input_ids = tokenizer.apply_chat_template(
         messages,
         return_tensors="pt",
         add_generation_prompt=True
     ).to(model.device)
+
     with torch.no_grad():
         output = model.generate(
-            **inputs,
+            input_ids=input_ids,
             max_new_tokens=32,
             do_sample=False,
         )
