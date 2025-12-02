@@ -70,9 +70,9 @@ def classify_reasoning_category(question: str) -> str:
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     with torch.no_grad():
         output = model.generate(
-            **inputs, 
-            max_new_tokens=32, 
-            temperature=0.0, 
+            **inputs,
+            max_new_tokens=32,
+            do_sample=False,
         )
     text = tokenizer.decode(output[0], skip_special_tokens=True)
     return text.split("\n")[-1].strip()
