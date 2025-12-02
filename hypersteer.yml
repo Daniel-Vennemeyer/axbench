@@ -70,7 +70,6 @@ dependencies:
   - entrypoints
   - exceptiongroup
   - executing
-  - fastjsonschema
   - filelock
   - fonttools
   - fqdn
@@ -109,13 +108,9 @@ dependencies:
   - jsonschema
   - jsonschema-specifications
   - jupyter
-  - jupyter-console
-  - jupyter-events
   - jupyter-lsp
-  - jupyter-server
   - jupyter_server
   - jupyterlab
-  - jupyterlab-widgets
   - jupyterlab_pygments
   - jupyterlab_server
   - kiwisolver
@@ -364,3 +359,8 @@ dependencies:
       - wordcloud==1.9.4
       - xlsxwriter==3.2.2
       - ydata-profiling==4.12.2
+      - jupyterlab-widgets
+      - jupyter-server
+      - jupyter-console
+      - fastjsonschema
+      - jupyter-events
