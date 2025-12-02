@@ -1,4 +1,4 @@
-BATCH_SIZE = 16
+BATCH_SIZE = 4
 import json
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
