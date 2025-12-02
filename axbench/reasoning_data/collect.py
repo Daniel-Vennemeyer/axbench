@@ -29,6 +29,25 @@ else:
     llm = LLM(model=MODEL_NAME, tensor_parallel_size=1)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
 
+import re
+
+def clean_category(text: str) -> str:
+    text = text.strip().strip('"').strip("'")
+    if "\n" in text:
+        text = text.split("\n")[-1].strip()
+    text = re.sub(r'(?i).*?category is:?', '', text).strip()
+    return text
+
+def is_valid_category(text: str) -> bool:
+    if not re.fullmatch(r"[A-Za-z0-9 ]+", text):
+        return False
+    if not text.endswith("Reasoning"):
+        return False
+    if len(text.split()) < 2:
+        return False
+    return True
+
+
 # -----------------------------
 # Reasoning Category Prompt
 # -----------------------------
@@ -90,8 +109,24 @@ def classify_reasoning_category(question: str) -> str:
         decoded = decoded.split("assistant")[-1]
 
     # Keep only last non-empty line
-    lines = [l.strip() for l in decoded.split("\n") if l.strip()]
-    return lines[-1] if lines else decoded.strip()
+    category = clean_category(decoded)
+
+    tries = 0
+    while not is_valid_category(category) and tries < 5:
+        with torch.no_grad():
+            output = model.generate(
+                input_ids=input_ids,
+                max_new_tokens=32,
+                do_sample=False,
+            )
+        decoded = tokenizer.decode(output[0], skip_special_tokens=True)
+        if "assistant" in decoded:
+            decoded = decoded.split("assistant")[-1]
+        category = clean_category(decoded)
+        tries += 1
+
+    return category
+
 
 # -----------------------------
 # Helper: Extract messages
