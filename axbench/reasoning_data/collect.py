@@ -62,21 +62,35 @@ User question:
 # -----------------------------
 
 def classify_reasoning_category(question: str) -> str:
-    prompt = CLASSIFICATION_PROMPT.format(question=question)
+    messages = [
+        {"role": "system", "content": "You are an expert at classifying reasoning tasks."},
+        {"role": "user", "content": CLASSIFICATION_PROMPT.format(question=question)}
+    ]
 
     if USE_VLLM:
-        outputs = llm.generate(prompt, sampling_params)
+        outputs = llm.generate(CLASSIFICATION_PROMPT.format(question=question), sampling_params)
         return outputs[0].outputs[0].text.strip()
 
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    inputs = tokenizer.apply_chat_template(
+        messages,
+        return_tensors="pt",
+        add_generation_prompt=True
+    ).to(model.device)
     with torch.no_grad():
         output = model.generate(
             **inputs,
             max_new_tokens=32,
             do_sample=False,
         )
-    text = tokenizer.decode(output[0], skip_special_tokens=True)
-    return text.split("\n")[-1].strip()
+    decoded = tokenizer.decode(output[0], skip_special_tokens=True)
+
+    # Extract only assistant content
+    if "assistant" in decoded:
+        decoded = decoded.split("assistant")[-1]
+
+    # Keep only last non-empty line
+    lines = [l.strip() for l in decoded.split("\n") if l.strip()]
+    return lines[-1] if lines else decoded.strip()
 
 # -----------------------------
 # Helper: Extract messages
