@@ -1,3 +1,4 @@
+ BATCH_SIZE = 8
 import json
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -158,35 +159,60 @@ next_concept_id = 0
 
 output_rows = []
 
+batch_inputs = []
+batch_assistants = []
+
 for ex in tqdm(ds["train"], desc="Classifying examples"):
-    # Extract messages
-    chosen_msg_list = ex["chosen"]
-    user_input, assistant_output = extract_user_and_assistant(chosen_msg_list)
+    user_input, assistant_output = extract_user_and_assistant(ex["chosen"])
+    batch_inputs.append(user_input)
+    batch_assistants.append(assistant_output)
 
-    # Run classification
-    category = classify_reasoning_category(user_input)
+    if len(batch_inputs) == BATCH_SIZE:
+        # classify as batch
+        categories = [classify_reasoning_category(q) for q in batch_inputs]
 
-    # Debug: print first 100 categories
+        for i in range(BATCH_SIZE):
+            category = categories[i]
+
+            if next_concept_id < 100:
+                print(f"Example {next_concept_id}: {category}")
+
+            if category not in concept_map:
+                concept_map[category] = next_concept_id
+                next_concept_id += 1
+
+            record = {
+                "input": batch_inputs[i],
+                "output": batch_assistants[i],
+                "output_concept": category,
+                "concept_genre": "positive",
+                "dataset_category": "instruction",
+                "concept_id": concept_map[category]
+            }
+            output_rows.append(record)
+
+        batch_inputs = []
+        batch_assistants = []
+
+# process remainder
+for i in range(len(batch_inputs)):
+    category = classify_reasoning_category(batch_inputs[i])
+
     if next_concept_id < 100:
         print(f"Example {next_concept_id}: {category}")
 
-    # Assign stable concept ID
     if category not in concept_map:
         concept_map[category] = next_concept_id
         next_concept_id += 1
 
-    concept_id = concept_map[category]
-
-    # Build final record
     record = {
-        "input": user_input,
-        "output": assistant_output,
+        "input": batch_inputs[i],
+        "output": batch_assistants[i],
         "output_concept": category,
         "concept_genre": "positive",
         "dataset_category": "instruction",
-        "concept_id": concept_id
+        "concept_id": concept_map[category]
     }
-
     output_rows.append(record)
 
 # -----------------------------
