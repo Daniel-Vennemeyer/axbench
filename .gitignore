@@ -215,3 +215,6 @@ cython_debug/
 *.pkl
 *.pdf
 axbench/scripts/paper/
+
+
+axbench/reasoning_data/reasoning_data.jsonl
