@@ -115,6 +115,11 @@ class HyperSteer(Model):
         ax_model = IntervenableModel(ax_config, self.model)
         ax_model.set_device(self.device)
         self.ax_model = ax_model
+        # Enable gradient checkpointing to reduce memory usage
+        if hasattr(self.model, "gradient_checkpointing_enable"):
+            self.model.gradient_checkpointing_enable()
+        if hasattr(self.model.config, "use_cache"):
+            self.model.config.use_cache = False
         
         hypernet_name_or_path = kwargs.get("hypernet_name_or_path", "google/gemma-2-2b")
         
