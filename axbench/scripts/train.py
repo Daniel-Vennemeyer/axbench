@@ -16,7 +16,7 @@ import datetime
 import pandas as pd
 import numpy as np
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from pathlib import Path
 from args.training_args import TrainingArgs
 from args.dataset_args import DatasetArgs
@@ -328,9 +328,23 @@ def main():
     # Set a unique seed per rank for reproducibility
     set_seed(args.seed + rank)
 
-    if args.overwrite_data_dir and Path(args.overwrite_data_dir).exists():
-        logger.warning(f"Overwriting data directory {args.data_dir}")
-        args.data_dir = args.overwrite_data_dir
+    if args.overwrite_data_dir:
+        odir = Path(args.overwrite_data_dir)
+        if odir.exists():
+            logger.warning(f"Using local dataset directory {odir}")
+            args.data_dir = str(odir)
+        else:
+            # Treat as Hugging Face dataset repo ID
+            logger.warning(f"Downloading HF dataset {args.overwrite_data_dir}")
+            hf_target_dir = Path(args.dump_dir) / "hf_datasets" / args.overwrite_data_dir.replace("/", "__")
+            hf_target_dir.mkdir(parents=True, exist_ok=True)
+            snapshot_download(
+                repo_id=args.overwrite_data_dir,
+                repo_type="dataset",
+                local_dir=hf_target_dir,
+                local_dir_use_symlinks=False,
+            )
+            args.data_dir = str(hf_target_dir)
     else:
         args.data_dir = f"{args.dump_dir}/generate"
 
