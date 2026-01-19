@@ -89,6 +89,7 @@ def data_generator(data_dir, use_dpo_loss=False):
                 yield (concept_id, df_subset)
 
 
+
 def load_metadata(metadata_path):
     """
     Load metadata from a JSON lines file.
@@ -99,6 +100,82 @@ def load_metadata(metadata_path):
             data = json.loads(line)
             metadata += [data]  # Return the metadata as is
     return metadata
+
+
+# --- HF snapshot conversion helpers ---
+def _find_hf_train_parquet(data_dir: str) -> str | None:
+    """Return a parquet path from an HF dataset snapshot (e.g., train-00000-of-00001.parquet)."""
+    candidates = sorted(glob.glob(os.path.join(data_dir, "train-*.parquet")))
+    return candidates[0] if candidates else None
+
+
+def _ensure_axbench_files_from_hf_snapshot(data_dir: str) -> None:
+    """
+    HF datasets often download as `train-00000-of-00001.parquet` without AxBench's expected
+    `train_data.parquet` and `metadata.jsonl`. Convert in-place (no synthetic data).
+    """
+    train_data_path = os.path.join(data_dir, "train_data.parquet")
+    metadata_path = os.path.join(data_dir, "metadata.jsonl")
+
+    # If AxBench-format files already exist, do nothing.
+    if os.path.exists(train_data_path) and os.path.exists(metadata_path):
+        return
+
+    hf_parquet = _find_hf_train_parquet(data_dir)
+    if hf_parquet is None:
+        # Nothing we can do; caller will error on missing files.
+        return
+
+    # Load the HF parquet and write it to AxBench's expected filename if needed.
+    df = pd.read_parquet(hf_parquet)
+    if not os.path.exists(train_data_path):
+        df.to_parquet(train_data_path, index=False)
+
+    # If metadata is missing, build minimal per-concept entries from the dataframe.
+    # This is derived from existing columns; no generation.
+    if not os.path.exists(metadata_path):
+        # Try to infer a concept name column, otherwise fall back to str(concept_id).
+        concept_name_col = None
+        for c in ["concept", "concept_name", "concept_str"]:
+            if c in df.columns:
+                concept_name_col = c
+                break
+
+        genre_col = "concept_genre" if "concept_genre" in df.columns else None
+
+        # Prefer "concept_id" if present; otherwise try "output_concept" which AxBench uses.
+        if "concept_id" in df.columns:
+            cid_col = "concept_id"
+        elif "output_concept" in df.columns:
+            cid_col = "output_concept"
+        else:
+            cid_col = None
+
+        metadata_entries = []
+        if cid_col is not None:
+            concept_ids = pd.Series(df[cid_col].unique()).dropna().astype(int).tolist()
+            concept_ids.sort()
+            for cid in concept_ids:
+                if cid < 0:
+                    continue
+                sub = df[df[cid_col] == cid]
+                if concept_name_col is not None and len(sub) > 0:
+                    concept_name = str(sub.iloc[0][concept_name_col])
+                else:
+                    concept_name = str(cid)
+                if genre_col is not None and len(sub) > 0:
+                    genre = str(sub.iloc[0][genre_col])
+                else:
+                    genre = "unknown"
+                metadata_entries.append({
+                    "concept": concept_name,
+                    "concept_genres_map": {concept_name: [genre]},
+                })
+
+        # Write one JSON object per line to match AxBench expectations.
+        with open(metadata_path, "w") as f:
+            for entry in metadata_entries:
+                f.write(json.dumps(entry) + "\n")
 
 
 def prepare_df(
@@ -338,15 +415,24 @@ def main():
             logger.warning(f"Downloading HF dataset {args.overwrite_data_dir}")
             hf_target_dir = Path(args.dump_dir) / "hf_datasets" / args.overwrite_data_dir.replace("/", "__")
             hf_target_dir.mkdir(parents=True, exist_ok=True)
-            snapshot_download(
-                repo_id=args.overwrite_data_dir,
-                repo_type="dataset",
-                local_dir=hf_target_dir,
-                local_dir_use_symlinks=False,
-            )
+
+            # Only rank 0 downloads; others wait to avoid race conditions.
+            if rank == 0:
+                snapshot_download(
+                    repo_id=args.overwrite_data_dir,
+                    repo_type="dataset",
+                    local_dir=hf_target_dir,
+                    local_dir_use_symlinks=False,
+                )
+            dist.barrier()
             args.data_dir = str(hf_target_dir)
     else:
         args.data_dir = f"{args.dump_dir}/generate"
+
+    # If this is an HF snapshot that doesn't include AxBench's expected filenames, convert in-place.
+    if rank == 0:
+        _ensure_axbench_files_from_hf_snapshot(args.data_dir)
+    dist.barrier()
 
     # Configure the logger per rank
     logger.setLevel(logging.WARNING)  # Set the logging level as desired
