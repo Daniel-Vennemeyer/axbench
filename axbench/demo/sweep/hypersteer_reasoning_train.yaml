@@ -18,6 +18,6 @@ train:
       binarize_dataset: false
       train_on_negative: false
       exclude_bos: true
-      hypernet_name_or_path: "/data/jiang/vennemdp/hyperreft-2b"
+      hypernet_name_or_path: "google/gemma-2-2b-it"
       num_hidden_layers: 4
       hypernet_initialize_from_pretrained: true
