@@ -173,9 +173,15 @@ def _ensure_axbench_files_from_hf_snapshot(data_dir: str) -> None:
                 })
 
         # Write one JSON object per line to match AxBench expectations.
+        # Always create the file even if entries are empty to avoid FileNotFoundError.
+        os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
         with open(metadata_path, "w") as f:
-            for entry in metadata_entries:
-                f.write(json.dumps(entry) + "\n")
+            if metadata_entries:
+                for entry in metadata_entries:
+                    f.write(json.dumps(entry) + "\n")
+            else:
+                # Create an empty metadata file if we could not infer entries
+                pass
 
 
 def prepare_df(
@@ -432,6 +438,7 @@ def main():
     # If this is an HF snapshot that doesn't include AxBench's expected filenames, convert in-place.
     if rank == 0:
         _ensure_axbench_files_from_hf_snapshot(args.data_dir)
+        logger.warning(f"HF snapshot conversion complete. Files now present: {os.listdir(args.data_dir)}")
     dist.barrier()
 
     # Configure the logger per rank
