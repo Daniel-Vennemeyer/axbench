@@ -461,8 +461,17 @@ def main():
     if rank == 0:
         _ensure_axbench_files_from_hf_snapshot(args.data_dir)
         resolved = _resolve_hf_data_root(args.data_dir)
-        logger.warning(f"HF snapshot conversion complete. Using data dir: {resolved}. Files present: {os.listdir(resolved)}")
-        args.data_dir = resolved
+        logger.warning(
+            f"HF snapshot conversion complete. Using data dir: {resolved}. Files present: {os.listdir(resolved)}"
+        )
+    else:
+        resolved = None
+
+    # Broadcast the resolved data dir from rank 0 to all ranks
+    resolved_list = [resolved]
+    dist.broadcast_object_list(resolved_list, src=0)
+    args.data_dir = resolved_list[0]
+
     dist.barrier()
 
     # Configure the logger per rank
