@@ -1,0 +1,23 @@
+train:
+  model_name: "google/gemma-2-2b-it"
+  layer: 20
+  component: "res"
+  seed: 42
+  use_bf16: true
+  output_length: 128
+  models: 
+    HyperSteer:
+      batch_size: 12
+      gradient_accumulation_steps: 1
+      n_epochs: 10
+      lr: 0.00008
+      weight_decay: 0.00
+      low_rank_dimension: 1
+      intervention_positions: "all"
+      intervention_type: "addition" # clamping
+      binarize_dataset: false
+      train_on_negative: false
+      exclude_bos: true
+      hypernet_name_or_path: "/data/jiang/vennemdp/hyperreft-2b"
+      num_hidden_layers: 4
+      hypernet_initialize_from_pretrained: true
