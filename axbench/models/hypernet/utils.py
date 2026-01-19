@@ -43,7 +43,11 @@ def prepare_df_combined(
     suffix_length, suffix_str = get_suffix_length(tokenizer)
     # print(f"Suffix length for {model_name}: {suffix_length}, Suffix string: {suffix_str}")
     # assign input and output containing concept with 1, otherwise 0
-    positive_df = original_df[original_df["category"] == "positive"]
+    if "category" in original_df.columns:
+        positive_df = original_df[original_df["category"] == "positive"]
+    else:
+        # HyperSteer-only / instruction-only datasets (no explicit negatives)
+        positive_df = original_df.copy()
     
     # assert len(positive_df) > len(negative_df), "Positive examples should be more than negative examples."
     
