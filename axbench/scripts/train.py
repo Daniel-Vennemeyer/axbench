@@ -507,7 +507,8 @@ def main():
         all_df = pd.read_parquet(os.path.join(args.data_dir, 'dpo_train_data.parquet'))
     else:
         all_df = pd.read_parquet(os.path.join(args.data_dir, 'train_data.parquet')) # this is needed for binarizing the dataset
-    negative_df = all_df[(all_df["output_concept"] == EMPTY_CONCEPT) & (all_df["category"] == "negative")]
+    # HyperSteer-only: do not rely on explicit negatives
+    negative_df = all_df.iloc[0:0].copy()
     
     df_list = list(df_generator)
     logger.warning(f"Total number of concept df loaded: {len(df_list)}")
@@ -565,99 +566,9 @@ def main():
     # Run training for assigned concept_ids
     # logger.warning(metadata)
     
-    for concept_id, concept_df in my_df_list:
-        concept_id = int(concept_id)
-        if last_concept_id is not None and concept_id <= last_concept_id:
-            logger.warning(f"Rank {rank} skipping concept_id {concept_id} because it is already processed")
-            continue
-        logger.warning(f"Training models for concept_id {concept_id} on rank {rank}")
-        for model_name in sorted(args.models.keys()):
-            
-            if model_name == "HyperSteer":
-                continue # training of HyperSteer is ran separately.
-            
-            concept = metadata[concept_id]["concept"]
-            logger.warning(f"Training {model_name} with concept {concept}")
-            benchmark_model = getattr(axbench, model_name)(
-                model_instance, tokenizer, layer=args.layer,
-                training_args=args.models[model_name],
-                lm_model_name=args.model_name,
-                device=device, seed=args.seed, use_wandb=args.use_wandb
-            )
-            low_rank_dimension = args.models[model_name].low_rank_dimension \
-                if args.models[model_name].low_rank_dimension else 1
-            benchmark_model.make_model(
-                mode="train",
-                embed_dim=model_instance.config.hidden_size,
-                low_rank_dimension=low_rank_dimension,
-                dtype=torch.bfloat16 if args.use_bf16 else None,
-                intervention_type=args.models[model_name].intervention_type,
-                concept_id=concept_id,
-                sae_params=sae_params,
-                metadata_path=metadata_path,
-                dump_dir=dump_dir,
-                model_params=args.models[model_name],
-                dropout=args.models[model_name].dropout,
-                intervention_positions_dropout=args.models[model_name].intervention_positions_dropout,
-                preference_pairs=args.models[model_name].preference_pairs,
-            )
-            if model_name not in {"LoReFT", "LoRA", "SFT", "BoW", "PreferenceLoReFT", "ConceptLoReFT"} and args.use_bf16:
-                if isinstance(benchmark_model.ax, list):
-                    for ax in benchmark_model.ax:
-                        ax.to(torch.bfloat16)
-                else:
-                    benchmark_model.ax.to(torch.bfloat16)
-            kwargs = {
-                "prefix_length": prefix_length,
-                "positions": args.models[model_name].intervention_positions,
-                "exclude_bos": args.models[model_name].exclude_bos,
-                "metadata_path": metadata_path,
-                "use_dpo_loss": args.use_dpo_loss,
-                "logging_metadata": {
-                    "concept_id": concept_id,
-                    "model_name": model_name,
-                    "layer": args.layer,
-                },
-                "wandb_project": args.wandb_project,
-                "wandb_name": args.wandb_name,
-                "negative_only": args.models[model_name].negative_only,
-                "preference_pairs": args.models[model_name].preference_pairs,
-                "steering_prompt_type": args.models[model_name].steering_prompt_type,
-                "substraction_type": args.models[model_name].substraction_type,
-            }
-            prepared_df = concept_df.copy()
-            prepared_df = prepare_df(
-                prepared_df, negative_df, concept, metadata[concept_id], tokenizer, 
-                binarize=args.models[model_name].binarize_dataset, 
-                train_on_negative=args.models[model_name].train_on_negative,
-                use_dpo_loss=args.use_dpo_loss,
-                is_chat_model=is_chat_model,
-                output_length=int(args.output_length),
-                model_name=args.model_name,
-                max_num_of_examples=args.max_num_of_examples,
-                steering_prompt_type=args.models[model_name].steering_prompt_type,
-                keep_orig_axbench_format=generate_args.keep_orig_axbench_format,
-            )
-            benchmark_model.train(prepared_df, **kwargs)
-            benchmark_model.save(dump_dir, model_name=f"rank_{rank}_{model_name}")
-            if model_name == "SFT":
-                # we need to reload the original model after SFT.
-                if args.use_bf16:
-                    logger.warning(f"Using bfloat16 for model {args.model_name}")
-                model_instance = AutoModelForCausalLM.from_pretrained(
-                    args.model_name, torch_dtype=torch.bfloat16 if args.use_bf16 else None)
-                is_chat_model = True if args.model_name in CHAT_MODELS else False
-                model_instance = model_instance.eval()
-                model_instance.to(device)
-            if model_name == "LoRA":
-                model_instance = benchmark_model.ax_model.unload()
-            logger.warning(f"Saved weights and biases for model {model_name} on rank {rank}")
-            # Clean up
-            del benchmark_model
-            torch.cuda.empty_cache()
-        # After processing, save state
-        current_state = {'last_concept_id': concept_id}
-        save_state(dump_dir, current_state, metadata[concept_id], rank)
+    # HyperSteer-only run: skip per-concept baseline training.
+    logger.warning("HyperSteer-only mode enabled: skipping per-concept baseline training.")
+    logger.warning("Running HyperSteer-only training (no baselines, instruction-only data).")
 
     # Synchronize all processes
     dist.barrier()
@@ -693,103 +604,12 @@ def main():
         with open(config_path, 'w') as f:
             json.dump(config, f)
 
-        for model_name in sorted(args.models.keys()):
-            
-            if model_name == "HyperSteer":
-                continue
-            
-            # merge pruned SAEs
-            sae_files = [dump_dir / f"rank_{r}_{model_name}.pt" for r in range(world_size)]
-            sae_files_existing = [f for f in sae_files if f.exists()]
-            if not sae_files_existing:
-                logger.warning(f"No SAE files found for model {model_name}. Skipping.")
-            else:
-                sae_weights = [torch.load(f) for f in sae_files_existing]
-                combined_sae_params = {
-                    "b_dec": sae_weights[0]["b_dec"],
-                    "W_dec": [],
-                    "W_enc": [],
-                    "b_enc": [],
-                    "threshold": [],
-                }
-                for sae_weight in sae_weights:
-                    combined_sae_params["W_dec"].append(sae_weight["W_dec"])
-                    combined_sae_params["W_enc"].append(sae_weight["W_enc"])
-                    combined_sae_params["b_enc"].append(sae_weight["b_enc"])
-                    combined_sae_params["threshold"].append(sae_weight["threshold"])
-                for k, v in combined_sae_params.items():
-                    if k == "b_dec":
-                        continue
-                    if k == "W_enc":
-                        combined_sae_params[k] = torch.cat(v, dim=1)
-                    else:
-                        combined_sae_params[k] = torch.cat(v, dim=0)
-                torch.save(combined_sae_params, dump_dir / f"{model_name}.pt")
-                logger.warning(f"Saved merged SAE weights for model {model_name}")
-            
-            # merge top features
-            top_features_files = [dump_dir / f"rank_{r}_{model_name}_top_features.json" for r in range(world_size)]
-            top_features_files_existing = [f for f in top_features_files if f.exists()]
-            if not top_features_files_existing:
-                logger.warning(f"No top features files found for model {model_name}. Skipping.")
-            else:
-                combined_top_features = []
-                for top_feature_file in top_features_files:
-                    with open(top_feature_file, "r") as f:
-                        top_feature = json.load(f)
-                        combined_top_features.extend(top_feature)
-                with open(dump_dir / f"{model_name}_top_features.json", "w") as f:
-                    json.dump(combined_top_features, f)
-                logger.warning(f"Saved merged top features for model {model_name}")
-
-            # Collect per-rank weight and bias files
-            weight_files = [dump_dir / f"rank_{r}_{model_name}_weight.pt" for r in range(world_size)]
-            bias_files = [dump_dir / f"rank_{r}_{model_name}_bias.pt" for r in range(world_size)]
-
-            # Check if files exist
-            weight_files_existing = [f for f in weight_files if f.exists()]
-            bias_files_existing = [f for f in bias_files if f.exists()]
-
-            if not weight_files_existing or not bias_files_existing:
-                logger.warning(f"No weight or bias files found for model {model_name}. Skipping.")
-                continue
-
-            # Load weights and biases
-            weights = [torch.load(f) for f in weight_files_existing]
-            biases = [torch.load(f) for f in bias_files_existing]
-
-            # Concatenate weights and biases
-            if isinstance(weights[0], dict):
-                merged_weight = {}
-                for key in weights[0].keys():
-                    weight_tensors = [w[key] for w in weights]
-                    merged_weight[key] = torch.cat(weight_tensors, dim=0)
-            else:
-                merged_weight = torch.cat(weights, dim=0)
-
-            # Handle dictionary biases
-            if isinstance(biases[0], dict):
-                merged_bias = {}
-                for key in biases[0].keys():
-                    bias_tensors = [b[key] for b in biases]
-                    merged_bias[key] = torch.cat(bias_tensors, dim=0)
-            else:
-                merged_bias = torch.cat(biases, dim=0)
-
-            # Save merged weight and bias files
-            weight_file = dump_dir / f"{model_name}_weight.pt"
-            bias_file = dump_dir / f"{model_name}_bias.pt"
-            torch.save(merged_weight, weight_file)
-            torch.save(merged_bias, bias_file)
-            logger.warning(f"Saved merged weights and biases for model {model_name}")
-
-            # Optionally delete per-rank files
-            for f in weight_files_existing + bias_files_existing:
-                try:
-                    f.unlink()
-                    logger.warning(f"Deleted file {f.name}")
-                except Exception as e:
-                    logger.error(f"Error deleting file {f.name}: {e}")
+        # HyperSteer-only: skip merging non-HyperSteer artifacts
+        if False:
+            for model_name in sorted(args.models.keys()):
+                if model_name == "HyperSteer":
+                    continue
+                # merging logic for non-HyperSteer artifacts
 
     # Finalize the process group
     dist.destroy_process_group()
