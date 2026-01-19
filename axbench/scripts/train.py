@@ -216,7 +216,11 @@ def prepare_df(
     print(f"Suffix length for {model_name}: {suffix_length}, Suffix string: {suffix_str}")
     genre = metadata["concept_genres_map"][concept][0]
     # assign input and output containing concept with 1, otherwise 0
-    positive_df = original_df[(original_df["output_concept"] == concept) & (original_df["category"] == "positive")]
+    if "category" in original_df.columns:
+        positive_df = original_df[original_df["category"] == "positive"]
+    else:
+        # HyperSteer-only / instruction datasets
+        positive_df = original_df.copy()
     negative_df = negative_df[(negative_df["concept_genre"] == genre)]
     if max_num_of_examples:
         positive_df = positive_df.head(max_num_of_examples // 2)
