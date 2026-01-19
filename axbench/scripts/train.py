@@ -351,7 +351,8 @@ def save_state(dump_dir, state, concept_metadata, rank):
         
 def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, metadata, dump_dir, rank, device, local_rank, world_size):
     # Get the rank and world_size from environment variables
-    negative_df = all_df[(all_df["output_concept"] == EMPTY_CONCEPT) & (all_df["category"] == "negative")]
+    # HyperSteer-only: instruction datasets may not include explicit negatives or a `category` column
+    negative_df = all_df.iloc[0:0].copy()
     model_name = "HyperSteer"
     
     metadata_path = os.path.join(args.data_dir, 'metadata.jsonl')
