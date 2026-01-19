@@ -103,9 +103,30 @@ def load_metadata(metadata_path):
 
 
 # --- HF snapshot conversion helpers ---
+
+# Helper: Find the actual data root containing train-*.parquet (handles HF "data/" subdir)
+def _resolve_hf_data_root(data_dir: str) -> str:
+    """
+    HF datasets often download with files under a `data/` subdirectory.
+    Return the directory that actually contains train parquet files.
+    """
+    # Direct case
+    if glob.glob(os.path.join(data_dir, "train-*.parquet")):
+        return data_dir
+    # Common HF layout: data/
+    candidate = os.path.join(data_dir, "data")
+    if os.path.isdir(candidate) and glob.glob(os.path.join(candidate, "train-*.parquet")):
+        return candidate
+    # Fallback: recursive search (first match wins)
+    matches = glob.glob(os.path.join(data_dir, "**", "train-*.parquet"), recursive=True)
+    if matches:
+        return os.path.dirname(matches[0])
+    return data_dir
+
 def _find_hf_train_parquet(data_dir: str) -> str | None:
     """Return a parquet path from an HF dataset snapshot (e.g., train-00000-of-00001.parquet)."""
-    candidates = sorted(glob.glob(os.path.join(data_dir, "train-*.parquet")))
+    root = _resolve_hf_data_root(data_dir)
+    candidates = sorted(glob.glob(os.path.join(root, "train-*.parquet")))
     return candidates[0] if candidates else None
 
 
@@ -114,8 +135,9 @@ def _ensure_axbench_files_from_hf_snapshot(data_dir: str) -> None:
     HF datasets often download as `train-00000-of-00001.parquet` without AxBench's expected
     `train_data.parquet` and `metadata.jsonl`. Convert in-place (no synthetic data).
     """
-    train_data_path = os.path.join(data_dir, "train_data.parquet")
-    metadata_path = os.path.join(data_dir, "metadata.jsonl")
+    root = _resolve_hf_data_root(data_dir)
+    train_data_path = os.path.join(root, "train_data.parquet")
+    metadata_path = os.path.join(root, "metadata.jsonl")
 
     # If AxBench-format files already exist, do nothing.
     if os.path.exists(train_data_path) and os.path.exists(metadata_path):
@@ -438,7 +460,9 @@ def main():
     # If this is an HF snapshot that doesn't include AxBench's expected filenames, convert in-place.
     if rank == 0:
         _ensure_axbench_files_from_hf_snapshot(args.data_dir)
-        logger.warning(f"HF snapshot conversion complete. Files now present: {os.listdir(args.data_dir)}")
+        resolved = _resolve_hf_data_root(args.data_dir)
+        logger.warning(f"HF snapshot conversion complete. Using data dir: {resolved}. Files present: {os.listdir(resolved)}")
+        args.data_dir = resolved
     dist.barrier()
 
     # Configure the logger per rank
