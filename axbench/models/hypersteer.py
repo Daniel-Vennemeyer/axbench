@@ -180,7 +180,10 @@ class HyperSteer(Model):
 
     def train(self, examples, **kwargs):
         
-        rank = torch.distributed.get_rank()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+        else:
+            rank = 0
         world_size = kwargs.get("world_size", 1)
                  
         train_dataloader, train_sampler = self.make_dataloader(
@@ -408,7 +411,10 @@ class HyperSteer(Model):
         
         return_vector = kwargs.get("return_vector", False)
         
-        rank = torch.distributed.get_rank()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+        else:
+            rank = 0
         # set tokenizer padding to left
         self.tokenizer.padding_side = "left"
         # depending on the model, we use different concept id columns
