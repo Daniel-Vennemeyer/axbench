@@ -463,7 +463,8 @@ def main():
                     local_dir=hf_target_dir,
                     local_dir_use_symlinks=False,
                 )
-            dist.barrier()
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
             args.data_dir = str(hf_target_dir)
     else:
         args.data_dir = f"{args.dump_dir}/generate"
@@ -483,7 +484,8 @@ def main():
     dist.broadcast_object_list(resolved_list, src=0)
     args.data_dir = resolved_list[0]
 
-    dist.barrier()
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
 
     # Configure the logger per rank
     logger.setLevel(logging.WARNING)  # Set the logging level as desired
@@ -582,13 +584,15 @@ def main():
     logger.warning("Running HyperSteer-only training (no baselines, instruction-only data).")
 
     # Synchronize all processes
-    dist.barrier()
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
     
     if "HyperSteer" in args.models.keys():
         train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, metadata, dump_dir, rank, device, local_rank, world_size)
     
     # Synchronize all processes 
-    dist.barrier()
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
 
     # Rank 0 merges results
     if rank == 0:
