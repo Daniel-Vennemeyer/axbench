@@ -428,10 +428,7 @@ def main():
             init_method="env://",
             timeout=datetime.timedelta(seconds=6000),
         )
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            rank = dist.get_rank()
-        else:
-            rank = 0
+        rank = dist.get_rank()
         world_size = dist.get_world_size()
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
     else:
