@@ -388,9 +388,6 @@ def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, met
     )
     
     full_df = all_df.copy()
-    # Optional: truncate total training examples (HyperSteer-only)
-    if hasattr(args, "max_training_examples") and args.max_training_examples:
-        full_df = full_df.head(args.max_training_examples)
     
     full_df = prepare_df_combined(
         full_df, negative_df, tokenizer, 
@@ -401,6 +398,10 @@ def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, met
         model_name=args.model_name,
         max_num_of_examples=args.max_num_of_examples,
     )
+    # Apply max_training_examples AFTER dataset construction (critical)
+    if hasattr(args, "max_training_examples") and args.max_training_examples:
+        full_df = full_df.head(args.max_training_examples)
+        logger.warning(f"[HyperSteer] Final training rows after truncation: {len(full_df)}")
     
     kwargs = {
         "prefix_length": prefix_length,
