@@ -421,14 +421,21 @@ def main():
     args = TrainingArgs(section="train")
     generate_args = DatasetArgs(section="generate")
 
-    # Initialize the process group
-    dist.init_process_group(backend='nccl', init_method='env://', 
-                          timeout=datetime.timedelta(seconds=6000))
-
-    # Get the rank and world_size from environment variables
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    # Detect whether we are running under torchrun
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            timeout=datetime.timedelta(seconds=6000),
+        )
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    else:
+        # Single-process (no torch.distributed)
+        rank = 0
+        world_size = 1
+        local_rank = 0
 
     # Set the device for this process
     device = torch.device(f'cuda:{local_rank}')
