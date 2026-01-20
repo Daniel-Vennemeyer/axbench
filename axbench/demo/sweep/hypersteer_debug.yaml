@@ -10,7 +10,7 @@ train:
     HyperSteer:
       batch_size: 12
       gradient_accumulation_steps: 1
-      n_epochs: 100
+      n_epochs: 1
       lr: 0.00008
       weight_decay: 0.00
       low_rank_dimension: 1
