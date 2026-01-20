@@ -428,7 +428,10 @@ def main():
             init_method="env://",
             timeout=datetime.timedelta(seconds=6000),
         )
-        rank = dist.get_rank()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank = dist.get_rank()
+        else:
+            rank = 0
         world_size = dist.get_world_size()
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
     else:
@@ -630,7 +633,8 @@ def main():
                 # merging logic for non-HyperSteer artifacts
 
     # Finalize the process group
-    dist.destroy_process_group()
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
     # Remove handlers to prevent duplication if the script is run multiple times
     logger.removeHandler(console_handler)
