@@ -481,7 +481,10 @@ def main():
 
     # Broadcast the resolved data dir from rank 0 to all ranks
     resolved_list = [resolved]
-    dist.broadcast_object_list(resolved_list, src=0)
+
+    if dist.is_available() and dist.is_initialized():
+        dist.broadcast_object_list(resolved_list, src=0)
+
     args.data_dir = resolved_list[0]
 
     if dist.is_available() and dist.is_initialized():
