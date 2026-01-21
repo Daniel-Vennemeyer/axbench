@@ -398,11 +398,8 @@ def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, met
         model_name=args.model_name,
         max_num_of_examples=args.max_num_of_examples,
     )
-    # Apply max_training_examples AFTER dataset construction (critical)
-    if hasattr(args, "max_training_examples") and args.max_training_examples:
-        full_df = full_df.head(args.max_training_examples)
-        logger.warning(f"[HyperSteer] Final training rows after truncation: {len(full_df)}")
-    
+    # Removed: max_training_examples truncation here. It is now handled only inside HyperSteer.make_dataloader.
+
     kwargs = {
         "prefix_length": prefix_length,
         "positions": args.models[model_name].intervention_positions,
@@ -410,6 +407,7 @@ def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, met
         "metadata_path": metadata_path,
         "world_size": world_size,
         "max_train_steps": getattr(args.models[model_name], "max_train_steps", None),
+        "max_training_examples": getattr(args.models[model_name], "max_training_examples", None),
     }
     
     benchmark_model.train(full_df, **kwargs)
