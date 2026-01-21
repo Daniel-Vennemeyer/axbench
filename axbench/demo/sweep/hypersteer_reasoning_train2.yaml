@@ -30,6 +30,7 @@ inference:
   model_name: google/gemma-2-2b-it
   seed: 42
   use_bf16: true
+  mode: benchmark
 
   # Benchmark-specific
   benchmark_batch_size: 8
