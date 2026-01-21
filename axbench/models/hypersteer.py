@@ -179,67 +179,86 @@ class HyperSteer(Model):
         return model
 
     def train(self, examples, **kwargs):
-        
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             rank = torch.distributed.get_rank()
         else:
             rank = 0
         world_size = kwargs.get("world_size", 1)
-                 
+
+        # Optional hard cap on total optimizer steps (Option A)
+        max_train_steps = getattr(self.training_args, "max_train_steps", None)
+
         train_dataloader, train_sampler = self.make_dataloader(
             examples, rank=rank, concept_tokenizer=self.hypernet_tokenizer,
             distributed=True, **kwargs
         )
-                        
+
+        # Log the *true* expanded dataset size (critical for sanity)
+        if rank == 0:
+            try:
+                dataset_len = len(train_dataloader.dataset)
+            except Exception:
+                dataset_len = "unknown"
+            print(
+                f"[HyperSteer] rows_in_df={len(examples)} | "
+                f"expanded_dataset={dataset_len} | "
+                f"batch_size={self.training_args.batch_size}"
+            )
+
         torch.cuda.empty_cache()
-        
+
         embedding_model = self.concept_embedding if world_size == 1 else DDP(self.concept_embedding, device_ids=[rank], find_unused_parameters=True)
-        
+
         # Optimizer and lr
         optimizer = torch.optim.AdamW(
-            embedding_model.parameters(), 
+            embedding_model.parameters(),
             lr=self.training_args.lr, weight_decay=self.training_args.weight_decay
         )
-            
-        num_training_steps = self.training_args.n_epochs * (len(train_dataloader) // self.training_args.gradient_accumulation_steps)
-        
+
+        steps_per_epoch = max(1, len(train_dataloader) // self.training_args.gradient_accumulation_steps)
+        num_training_steps = self.training_args.n_epochs * steps_per_epoch
+        if max_train_steps is not None:
+            num_training_steps = min(num_training_steps, max_train_steps)
+
         lr_scheduler = get_scheduler(
             "linear", optimizer=optimizer,
             num_warmup_steps=0, num_training_steps=num_training_steps)
-                            
-        # Main training loop.        
+
+        # Main training loop.
         progress_bar, curr_step, losses = tqdm(range(num_training_steps), position=rank, leave=True), 0, []
-            
-        embedding_model.train()        
-        
+
+        embedding_model.train()
+
         for epoch in range(self.training_args.n_epochs):
-            
             for step, batch in enumerate(train_dataloader):
-                                
+                # Enforce the hard stop inside the training loop
+                if max_train_steps is not None and curr_step >= max_train_steps:
+                    break
+
                 train_sampler.set_epoch(epoch)
-                
+
                 # prepare input
                 inputs = {k: v.to(self.device) for k, v in batch.items()}
-                                
-                unit_locations={"sources->base": (
+
+                unit_locations = {"sources->base": (
                     None,
                     inputs["intervention_locations"].permute(1, 0, 2).tolist()
                 )}
                 subspaces = [{
                     "k": self.training_args.topk
                 }]
-                
+
                 concept_inputs_embeds = None
-                
-                base_intervention_mask = inputs["labels"] == -100                
+
+                base_intervention_mask = inputs["labels"] == -100
                 base_intervention_mask = base_intervention_mask & inputs["attention_mask"]
-                
+
                 base_hidden_state = self.model(
                     input_ids=inputs["input_ids"],
                     attention_mask=base_intervention_mask,
                     output_hidden_states=True,
                 ).hidden_states[self.layer]
-                
+
                 v = embedding_model(
                     input_ids=inputs["concept_input_ids"],
                     inputs_embeds=concept_inputs_embeds,
@@ -248,9 +267,9 @@ class HyperSteer(Model):
                     base_encoder_attention_mask=base_intervention_mask,
                     output_hidden_states=False,
                 ).last_hidden_state
-                                                                
+
                 self.ax._update_v(v)
-                                
+
                 # forward
                 _, cf_outputs = self.ax_model(
                     base={
@@ -258,26 +277,26 @@ class HyperSteer(Model):
                         "attention_mask": inputs["attention_mask"]
                     }, unit_locations=unit_locations, labels=inputs["labels"],
                     subspaces=subspaces, use_cache=False)
-                                
+
                 steering_loss = cf_outputs.loss
-                
+
                 loss = steering_loss
                 loss = loss.mean()
                 loss /= self.training_args.gradient_accumulation_steps
-                    
+
                 loss.backward()
-                
+
                 # clear the steering vector generated for this batch
                 self.ax._reset_v()
-            
+
                 # Perform optimization step every gradient_accumulation_steps
                 if (step + 1) % self.training_args.gradient_accumulation_steps == 0 or (step + 1) == len(train_dataloader):
                     torch.nn.utils.clip_grad_norm_(embedding_model.parameters(), 1.0)
                     # set_decoder_norm_to_unit_norm(self.ax)
-                    
+
                     # TODO: need to be implimented for concept_embedding
                     # remove_gradient_parallel_to_decoder_directions(self.ax)
-                    
+
                     curr_step += 1
                     losses.append(loss.item())
                     curr_lr = get_lr(optimizer)
@@ -288,7 +307,13 @@ class HyperSteer(Model):
                     progress_bar.update(1)
                     progress_bar.set_description(
                         "lr %.6f || loss %.6f" % (curr_lr, loss))
-             
+            # After inner loop, break if hard cap reached
+            if max_train_steps is not None and curr_step >= max_train_steps:
+                break
+
+        # (Optional but recommended) Make the stop visible
+        if rank == 0 and max_train_steps is not None:
+            print(f"[HyperSteer] Stopped early at step {curr_step}/{max_train_steps}")
         progress_bar.close()
         
         
