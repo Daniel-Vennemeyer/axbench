@@ -349,30 +349,30 @@ def save_state(dump_dir, state, concept_metadata, rank):
         f.write(json.dumps(concept_metadata) + "\n")
         
         
-def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, metadata, dump_dir, rank, device, local_rank, world_size):
+def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, metadata, dump_dir, rank, device, local_rank, world_size, raw_cfg):
     # Get the rank and world_size from environment variables
     # HyperSteer-only: instruction datasets may not include explicit negatives or a `category` column
     negative_df = all_df.iloc[0:0].copy()
     model_name = "HyperSteer"
-    
+
     metadata_path = os.path.join(args.data_dir, 'metadata.jsonl')
     is_chat_model = True if args.model_name in CHAT_MODELS else False
-    
+
     benchmark_model = getattr(axbench, model_name)(
         model_instance, tokenizer, layer=args.layer,
         training_args=args.models[model_name],
         lm_model_name=args.model_name,
-        device=device, seed=args.seed, 
+        device=device, seed=args.seed,
     )
-    
+
     low_rank_dimension = args.models[model_name].low_rank_dimension \
         if args.models[model_name].low_rank_dimension else 1
-        
+
     prefix_length = 1 # prefix is default to 1 for all models due to theBOS token.
     if is_chat_model:
         prefix_length = get_prefix_length(tokenizer)
         logger.warning(f"Chat model prefix length: {prefix_length}")
-        
+
     benchmark_model.make_model(
         mode="train",
         embed_dim=model_instance.config.hidden_size,
@@ -386,12 +386,12 @@ def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, met
         hypernet_name_or_path=args.models[model_name].hypernet_name_or_path,
         hypernet_initialize_from_pretrained=args.models[model_name].hypernet_initialize_from_pretrained,
     )
-    
+
     full_df = all_df.copy()
-    
+
     full_df = prepare_df_combined(
-        full_df, negative_df, tokenizer, 
-        binarize=args.models[model_name].binarize_dataset, 
+        full_df, negative_df, tokenizer,
+        binarize=args.models[model_name].binarize_dataset,
         train_on_negative=args.models[model_name].train_on_negative,
         is_chat_model=is_chat_model,
         output_length=generate_args.output_length,
@@ -400,9 +400,9 @@ def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, met
     )
     # Removed: max_training_examples truncation here. It is now handled only inside HyperSteer.make_dataloader.
 
-    # Read raw YAML config to avoid TrainingArgs dropping unknown fields
+    # Read raw YAML config (TrainingArgs drops unknown fields)
     raw_model_cfg = (
-        args._raw_config
+        raw_cfg
             .get("train", {})
             .get("models", {})
             .get(model_name, {})
@@ -419,7 +419,7 @@ def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, met
     }
     if rank == 0:
         print("[DEBUG] raw HyperSteer config:", raw_model_cfg)
-    
+
     benchmark_model.train(full_df, **kwargs)
     if rank == 0:
         logger.warning("Rank 0 is merging results.")
@@ -430,6 +430,10 @@ def main():
    
     args = TrainingArgs(section="train")
     generate_args = DatasetArgs(section="generate")
+
+    # Explicitly load raw YAML config (TrainingArgs drops unknown fields)
+    with open(args.config, "r") as f:
+        raw_cfg = yaml.safe_load(f)
 
     # Detect whether we are running under torchrun
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
@@ -601,7 +605,12 @@ def main():
         dist.barrier()
     
     if "HyperSteer" in args.models.keys():
-        train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, metadata, dump_dir, rank, device, local_rank, world_size)
+        train_hypersteer(
+            args, generate_args, model_instance, tokenizer,
+            all_df, metadata, dump_dir,
+            rank, device, local_rank, world_size,
+            raw_cfg=raw_cfg,
+        )
     
     # Synchronize all processes 
     if dist.is_available() and dist.is_initialized():
