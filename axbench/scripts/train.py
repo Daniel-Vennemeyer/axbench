@@ -409,6 +409,7 @@ def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, met
         "exclude_bos": args.models[model_name].exclude_bos,
         "metadata_path": metadata_path,
         "world_size": world_size,
+        "max_train_steps": getattr(args.models[model_name], "max_train_steps", None),
     }
     
     benchmark_model.train(full_df, **kwargs)
