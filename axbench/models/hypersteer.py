@@ -337,13 +337,12 @@ class HyperSteer(Model):
         
     def make_dataloader(self, examples, rank, world_size, shuffle=True, distributed=False, concept_tokenizer=None, **kwargs):
         if distributed:
-            sampler = DistributedSampler(
+            data_module = make_data_module(
+                self.tokenizer,
                 examples,
-                num_replicas=world_size,
-                rank=rank,
-                shuffle=shuffle
+                concept_tokenizer=self.hypernet_tokenizer,
+                **kwargs
             )
-            data_module = make_data_module(self.tokenizer, examples, concept_tokenizer=self.hypernet_tokenizer, **kwargs)
 
             # --- APPLY max_training_examples AT DATASET LEVEL ---
             max_examples = kwargs.get(
@@ -351,10 +350,25 @@ class HyperSteer(Model):
                 getattr(self.training_args, "max_training_examples", None),
             )
             train_dataset = data_module["train_dataset"]
+
             if max_examples is not None:
                 train_dataset = torch.utils.data.Subset(
                     train_dataset,
                     list(range(min(max_examples, len(train_dataset))))
+                )
+
+            sampler = DistributedSampler(
+                train_dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=shuffle
+            )
+
+            # Log sampler length for debugging
+            if rank == 0:
+                print(
+                    f"[HyperSteer] sampler_len={len(sampler)} | "
+                    f"dataset_len={len(train_dataset)}"
                 )
 
             g = torch.Generator()
