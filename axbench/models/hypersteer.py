@@ -209,7 +209,7 @@ class HyperSteer(Model):
                 f"expanded_dataset={dataset_len} | "
                 f"batch_size={self.training_args.batch_size}"
             )
-            print(f"[HyperSteer] max_training_examples (effective): {getattr(self.training_args, 'max_training_examples', None)}")
+            print(f"[HyperSteer] max_training_examples resolved to: {kwargs.get('max_training_examples', None)}")
 
         torch.cuda.empty_cache()
 
@@ -346,7 +346,10 @@ class HyperSteer(Model):
             data_module = make_data_module(self.tokenizer, examples, concept_tokenizer=self.hypernet_tokenizer, **kwargs)
 
             # --- APPLY max_training_examples AT DATASET LEVEL ---
-            max_examples = getattr(self.training_args, "max_training_examples", None)
+            max_examples = kwargs.get(
+                "max_training_examples",
+                getattr(self.training_args, "max_training_examples", None),
+            )
             train_dataset = data_module["train_dataset"]
             if max_examples is not None:
                 train_dataset = torch.utils.data.Subset(
@@ -368,7 +371,10 @@ class HyperSteer(Model):
             data_module = make_data_module(self.tokenizer, examples, concept_tokenizer=self.hypernet_tokenizer, **kwargs)
 
             # --- APPLY max_training_examples AT DATASET LEVEL ---
-            max_examples = getattr(self.training_args, "max_training_examples", None)
+            max_examples = kwargs.get(
+                "max_training_examples",
+                getattr(self.training_args, "max_training_examples", None),
+            )
             train_dataset = data_module["train_dataset"]
             if max_examples is not None:
                 train_dataset = torch.utils.data.Subset(
