@@ -4,6 +4,7 @@ train:
   component: "res"
   seed: 42
   max_training_examples: 32
+  n_epochs: 100
   use_bf16: true
   output_length: 128
   models: 
