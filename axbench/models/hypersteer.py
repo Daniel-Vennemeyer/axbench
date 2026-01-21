@@ -209,6 +209,7 @@ class HyperSteer(Model):
                 f"expanded_dataset={dataset_len} | "
                 f"batch_size={self.training_args.batch_size}"
             )
+            print(f"[HyperSteer] max_training_examples (effective): {getattr(self.training_args, 'max_training_examples', None)}")
 
         torch.cuda.empty_cache()
 
@@ -335,34 +336,55 @@ class HyperSteer(Model):
         pass
         
     def make_dataloader(self, examples, rank, world_size, shuffle=True, distributed=False, concept_tokenizer=None, **kwargs):
-        
         if distributed:
             sampler = DistributedSampler(
-                examples, 
+                examples,
                 num_replicas=world_size,
                 rank=rank,
                 shuffle=shuffle
             )
             data_module = make_data_module(self.tokenizer, examples, concept_tokenizer=self.hypernet_tokenizer, **kwargs)
+
+            # --- APPLY max_training_examples AT DATASET LEVEL ---
+            max_examples = getattr(self.training_args, "max_training_examples", None)
+            train_dataset = data_module["train_dataset"]
+            if max_examples is not None:
+                train_dataset = torch.utils.data.Subset(
+                    train_dataset,
+                    list(range(min(max_examples, len(train_dataset))))
+                )
+
             g = torch.Generator()
             g.manual_seed(self.seed)
             train_dataloader = DataLoader(
-                data_module["train_dataset"],
-                batch_size=self.training_args.batch_size, 
+                train_dataset,
+                batch_size=self.training_args.batch_size,
                 collate_fn=data_module["data_collator"],
                 sampler=sampler,
-                generator=g)
+                generator=g
+            )
             return train_dataloader, sampler
         else:
             data_module = make_data_module(self.tokenizer, examples, concept_tokenizer=self.hypernet_tokenizer, **kwargs)
+
+            # --- APPLY max_training_examples AT DATASET LEVEL ---
+            max_examples = getattr(self.training_args, "max_training_examples", None)
+            train_dataset = data_module["train_dataset"]
+            if max_examples is not None:
+                train_dataset = torch.utils.data.Subset(
+                    train_dataset,
+                    list(range(min(max_examples, len(train_dataset))))
+                )
+
             g = torch.Generator()
             g.manual_seed(self.seed)
             train_dataloader = DataLoader(
-                data_module["train_dataset"],
-                batch_size=self.training_args.batch_size, 
+                train_dataset,
+                batch_size=self.training_args.batch_size,
                 collate_fn=data_module["data_collator"],
                 shuffle=shuffle,
-                generator=g)
+                generator=g
+            )
             return train_dataloader
     
     def save(self, dump_dir, **kwargs):
