@@ -193,6 +193,16 @@ class HyperSteer(Model):
         if rank == 0:
             print(f"[HyperSteer] max_train_steps resolved to: {max_train_steps}")
 
+        # Override n_epochs from raw YAML if provided (Option A consistency)
+        raw_n_epochs = kwargs.get("n_epochs", None)
+        if raw_n_epochs is not None:
+            if rank == 0:
+                print(
+                    f"[HyperSteer] Overriding n_epochs: "
+                    f"{self.training_args.n_epochs} → {raw_n_epochs}"
+                )
+            self.training_args.n_epochs = int(raw_n_epochs)
+
         train_dataloader, train_sampler = self.make_dataloader(
             examples, rank=rank, concept_tokenizer=self.hypernet_tokenizer,
             distributed=True, **kwargs
