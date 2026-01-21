@@ -186,7 +186,12 @@ class HyperSteer(Model):
         world_size = kwargs.get("world_size", 1)
 
         # Optional hard cap on total optimizer steps (Option A)
-        max_train_steps = getattr(self.training_args, "max_train_steps", None)
+        max_train_steps = kwargs.get(
+            "max_train_steps",
+            getattr(self.training_args, "max_train_steps", None),
+        )
+        if rank == 0:
+            print(f"[HyperSteer] max_train_steps resolved to: {max_train_steps}")
 
         train_dataloader, train_sampler = self.make_dataloader(
             examples, rank=rank, concept_tokenizer=self.hypernet_tokenizer,
@@ -307,6 +312,9 @@ class HyperSteer(Model):
                     progress_bar.update(1)
                     progress_bar.set_description(
                         "lr %.6f || loss %.6f" % (curr_lr, loss))
+                    # Sanity-check the stopping condition is actually hit
+                    if max_train_steps is not None and curr_step == max_train_steps:
+                        print("[HyperSteer] HARD STOP reached")
             # After inner loop, break if hard cap reached
             if max_train_steps is not None and curr_step >= max_train_steps:
                 break
