@@ -1242,19 +1242,32 @@ def main():
     logger.warning(inference_args)
     set_seed(inference_args.seed)
 
-    # Initialize the process group
-    dist.init_process_group(backend='nccl', init_method='env://', 
-                          timeout=datetime.timedelta(seconds=60000))
+    # ---------------- Distributed setup ----------------
+    if inference_args.mode == "benchmark":
+        # Benchmark mode: single-process, no torch.distributed
+        rank = 0
+        world_size = 1
+        local_rank = 0
 
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        if device.type == "cuda":
+            torch.cuda.set_device(device)
 
-    # Get the rank and world_size from environment variables
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+        logger.warning("[Benchmark] Running in single-process (non-distributed) mode.")
+    else:
+        # AxBench inference modes: require torch.distributed
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            timeout=datetime.timedelta(seconds=60000),
+        )
 
-    # Set the device for this process
-    device = torch.device(f'cuda:{local_rank}')
-    torch.cuda.set_device(device)
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(device)
 
     # Configure the logger per rank
     logger.setLevel(logging.WARNING)  # Set the logging level as desired
@@ -1304,7 +1317,8 @@ def main():
         )
 
     # Finalize the process group
-    dist.destroy_process_group()
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
     # Remove handlers to prevent duplication if the script is run multiple times
     logger.removeHandler(console_handler)
