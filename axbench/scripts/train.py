@@ -624,18 +624,32 @@ def main():
     if rank == 0:
         logger.warning("Rank 0 is merging results.")
 
-        # Merging metadata
+        # Merging metadata (may not exist in HyperSteer-only mode)
         metadata_entries = []
         for r in range(world_size):
-            metadata_path = os.path.join(dump_dir, f"rank_{r}_{METADATA_FILE}")
-            with open(metadata_path, "r") as f:
+            rank_metadata_path = os.path.join(dump_dir, f"rank_{r}_{METADATA_FILE}")
+            if not os.path.exists(rank_metadata_path):
+                logger.warning(
+                    f"[HyperSteer] Metadata file not found at {rank_metadata_path}. "
+                    "Skipping (expected in HyperSteer-only mode)."
+                )
+                continue
+            with open(rank_metadata_path, "r") as f:
                 for line in f:
                     metadata_entry = json.loads(line)
                     metadata_entries.append(metadata_entry)
-        metadata_path = os.path.join(dump_dir, METADATA_FILE)
-        with open(metadata_path, "a") as f:
-            for metadata_entry in metadata_entries:
-                f.write(json.dumps(metadata_entry) + "\n")
+
+        # Write merged metadata only if we actually collected entries
+        if metadata_entries:
+            merged_metadata_path = os.path.join(dump_dir, METADATA_FILE)
+            with open(merged_metadata_path, "a") as f:
+                for metadata_entry in metadata_entries:
+                    f.write(json.dumps(metadata_entry) + "\n")
+        else:
+            logger.warning(
+                "[HyperSteer] No per-rank metadata found. "
+                "Skipping merged metadata write."
+            )
 
         # Save other config
         config = {"model_name": args.model_name,
