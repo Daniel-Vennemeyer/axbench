@@ -22,3 +22,16 @@ train:
       hypernet_name_or_path: "google/gemma-2-2b-it"
       num_hidden_layers: 4
       hypernet_initialize_from_pretrained: true
+inference:
+  mode: benchmark
+  benchmark: gsm8k
+
+  # REQUIRED for GSM8K
+  model_name: google/gemma-2-2b-it
+  seed: 42
+  use_bf16: true
+
+  # Benchmark-specific
+  benchmark_batch_size: 8
+  max_questions: 100
+  use_steering: false
