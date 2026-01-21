@@ -400,15 +400,25 @@ def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, met
     )
     # Removed: max_training_examples truncation here. It is now handled only inside HyperSteer.make_dataloader.
 
+    # Read raw YAML config to avoid TrainingArgs dropping unknown fields
+    raw_model_cfg = (
+        args._raw_config
+            .get("train", {})
+            .get("models", {})
+            .get(model_name, {})
+    )
+
     kwargs = {
         "prefix_length": prefix_length,
         "positions": args.models[model_name].intervention_positions,
         "exclude_bos": args.models[model_name].exclude_bos,
         "metadata_path": metadata_path,
         "world_size": world_size,
-        "max_train_steps": getattr(args.models[model_name], "max_train_steps", None),
-        "max_training_examples": getattr(args.models[model_name], "max_training_examples", None),
+        "max_train_steps": raw_model_cfg.get("max_train_steps", None),
+        "max_training_examples": raw_model_cfg.get("max_training_examples", None),
     }
+    if rank == 0:
+        print("[DEBUG] raw HyperSteer config:", raw_model_cfg)
     
     benchmark_model.train(full_df, **kwargs)
     if rank == 0:
