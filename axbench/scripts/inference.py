@@ -193,6 +193,8 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
     # shard dataset across ranks
     dataset = dataset.shard(num_shards=world_size, index=rank)
 
+    dataset_list = list(dataset)
+
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.padding_side = "left"
 
@@ -212,12 +214,12 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
     if getattr(args, "use_steering", False):
         prompts = [
             f"Question:\n{ex['question']}\n\nLet’s think step by step.\nAnswer:"
-            for ex in dataset
+            for ex in dataset_list
         ]
     else:
         prompts = [
             f"Question:\n{ex['question']}\n\nAnswer:"
-            for ex in dataset
+            for ex in dataset_list
         ]
 
     outputs = runner.run_batches(prompts)
@@ -226,18 +228,29 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
     total = 0
     records = []
 
-    for ex, out in zip(dataset, outputs):
+    pbar = tqdm(
+        zip(dataset_list, outputs),
+        total=len(dataset_list),
+        desc=f"GSM8K Rank {rank}",
+        leave=True,
+    )
+
+    for ex, out in pbar:
         gold = parse_gsm8k_gold(ex["answer"])
         pred = parse_gsm8k_pred(out)
         is_correct = pred == gold
         correct += int(is_correct)
         total += 1
+
         records.append({
             "question": ex["question"],
             "gold": gold,
             "pred": pred,
             "correct": is_correct
         })
+
+        if total > 0:
+            pbar.set_postfix(acc=f"{correct / total:.3f}")
 
     correct_t = torch.tensor(correct, device=device)
     total_t = torch.tensor(total, device=device)
