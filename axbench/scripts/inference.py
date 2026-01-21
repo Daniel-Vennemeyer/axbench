@@ -10,6 +10,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from pathlib import Path
 import atexit
+import re
+from datasets import load_dataset
 
 from axbench.utils.dataset import (
     DatasetFactory,
@@ -133,6 +135,133 @@ def partition_concept_ids(concept_ids, world_size):
         concept_ids_per_rank.append(concept_ids[start:end])
         start = end
     return concept_ids_per_rank
+
+
+# --------------------- Benchmark Evaluation Abstractions ---------------------
+
+class BenchmarkRunner:
+    def __init__(self, model, tokenizer, device, batch_size):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = device
+        self.batch_size = batch_size
+
+    def run_batches(self, prompts, max_new_tokens=128):
+        results = []
+        for i in range(0, len(prompts), self.batch_size):
+            batch = prompts[i:i+self.batch_size]
+            toks = self.tokenizer(
+                batch,
+                return_tensors="pt",
+                padding=True,
+                truncation=True
+            ).to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **toks,
+                    max_new_tokens=max_new_tokens,
+                    temperature=0.0,
+                    do_sample=False
+                )
+            decoded = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            results.extend(decoded)
+        return results
+
+
+def parse_gsm8k_gold(answer):
+    return int(answer.split("####")[-1].strip())
+
+def parse_gsm8k_pred(text):
+    if "####" in text:
+        nums = re.findall(r"-?\d+", text.split("####")[-1])
+        return int(nums[0]) if nums else None
+    nums = re.findall(r"-?\d+", text)
+    return int(nums[-1]) if nums else None
+
+
+# --------------------- Benchmark Inference Function ---------------------
+
+def infer_benchmark(args, rank, world_size, device, logger, training_args):
+    assert args.benchmark == "gsm8k", "Only GSM8K supported for now"
+
+    dataset = load_dataset("gsm8k", "main", split="test")
+
+    if getattr(args, "max_questions", None) is not None:
+        dataset = dataset.select(range(min(len(dataset), args.max_questions)))
+
+    # shard dataset across ranks
+    dataset = dataset.shard(num_shards=world_size, index=rank)
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer.padding_side = "left"
+
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name,
+        torch_dtype=torch.bfloat16 if getattr(args, "use_bf16", False) else None,
+        device_map=device
+    ).eval()
+
+    runner = BenchmarkRunner(
+        model,
+        tokenizer,
+        device,
+        batch_size=getattr(args, "benchmark_batch_size", 8)
+    )
+
+    if getattr(args, "use_steering", False):
+        prompts = [
+            f"Question:\n{ex['question']}\n\nLet’s think step by step.\nAnswer:"
+            for ex in dataset
+        ]
+    else:
+        prompts = [
+            f"Question:\n{ex['question']}\n\nAnswer:"
+            for ex in dataset
+        ]
+
+    outputs = runner.run_batches(prompts)
+
+    correct = 0
+    total = 0
+    records = []
+
+    for ex, out in zip(dataset, outputs):
+        gold = parse_gsm8k_gold(ex["answer"])
+        pred = parse_gsm8k_pred(out)
+        is_correct = pred == gold
+        correct += int(is_correct)
+        total += 1
+        records.append({
+            "question": ex["question"],
+            "gold": gold,
+            "pred": pred,
+            "correct": is_correct
+        })
+
+    correct_t = torch.tensor(correct, device=device)
+    total_t = torch.tensor(total, device=device)
+
+    dist.all_reduce(correct_t, op=dist.ReduceOp.SUM)
+    dist.all_reduce(total_t, op=dist.ReduceOp.SUM)
+
+    if rank == 0:
+        acc = correct_t.item() / max(1, total_t.item())
+        logger.warning(
+            f"[Benchmark:GSM8K] Accuracy={acc:.4f} "
+            f"({correct_t.item()}/{total_t.item()})"
+        )
+        out_dir = Path(args.dump_dir) / "benchmark"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with open(out_dir / "gsm8k_results.jsonl", "w") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        with open(out_dir / "gsm8k_summary.json", "w") as f:
+            json.dump({
+                "benchmark": "gsm8k",
+                "accuracy": acc,
+                "num_questions": total_t.item()
+            }, f, indent=2)
 
 
 def create_data_latent(dataset_factory, metadata, concept_id, num_of_examples, args):
@@ -1065,9 +1194,44 @@ def main():
             }
         }
     ]
+    # Add benchmark CLI args
+    benchmark_args = [
+        {
+            'args': ['--benchmark'],
+            'kwargs': {
+                'type': str,
+                'default': "gsm8k",
+                'help': 'Benchmark name (gsm8k)'
+            }
+        },
+        {
+            'args': ['--max_questions'],
+            'kwargs': {
+                'type': int,
+                'default': None,
+                'help': 'Max number of benchmark questions'
+            }
+        },
+        {
+            'args': ['--benchmark_batch_size'],
+            'kwargs': {
+                'type': int,
+                'default': 8,
+                'help': 'Benchmark batch size'
+            }
+        },
+        {
+            'args': ['--use_steering'],
+            'kwargs': {
+                'type': bool,
+                'default': False,
+                'help': 'Use steering prompt (CoT/HyperSteer style)'
+            }
+        },
+    ]
     training_args = TrainingArgs(custom_args=custom_args, section="train", ignore_unknown=True)
     generate_args = DatasetArgs(custom_args=custom_args, section="generate", ignore_unknown=True)
-    inference_args = DatasetArgs(custom_args=custom_args, section="inference", ignore_unknown=True)
+    inference_args = DatasetArgs(custom_args=(custom_args + benchmark_args), section="inference", ignore_unknown=True)
 
     if training_args.overwrite_metadata_dir is not None and os.path.exists(training_args.overwrite_metadata_dir):
         inference_args.data_dir = training_args.overwrite_metadata_dir # since we only load metadata from this dir
@@ -1134,6 +1298,10 @@ def main():
     elif inference_args.mode == "all":
         infer_latent(inference_args, rank, world_size, device, logger, training_args, generate_args)
         infer_steering(inference_args, rank, world_size, device, logger, training_args, generate_args, suppress_eval_dir=suppress_eval_dir)
+    elif inference_args.mode == "benchmark":
+        infer_benchmark(
+            inference_args, rank, world_size, device, logger, training_args
+        )
 
     # Finalize the process group
     dist.destroy_process_group()
