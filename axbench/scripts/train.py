@@ -427,13 +427,17 @@ def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, met
     
 
 def main():
-   
+    # --- Pre-parse --config so we can load raw YAML ---
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", type=str, required=True)
+    pre_args, _ = pre_parser.parse_known_args()
+
+    with open(pre_args.config, "r") as f:
+        raw_cfg = yaml.safe_load(f)
+
+    # --- Now parse structured args ---
     args = TrainingArgs(section="train")
     generate_args = DatasetArgs(section="generate")
-
-    # Explicitly load raw YAML config (TrainingArgs drops unknown fields)
-    with open(args.config, "r") as f:
-        raw_cfg = yaml.safe_load(f)
 
     # Detect whether we are running under torchrun
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
