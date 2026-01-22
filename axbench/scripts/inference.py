@@ -477,13 +477,58 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         for ex in dataset
     ]
 
-    outputs = benchmark_model.predict_generate(
-        prompts,
-        batch_size=getattr(args, "benchmark_batch_size", 8),
-        eval_output_length=128,
+    # ---- Run steered generation via predict_steer ----
+    # HyperSteer exposes predict_steer (used by infer_steering), not predict_generate.
+    batch_size = int(getattr(args, "benchmark_batch_size", 8))
+    eval_output_length = int(getattr(args, "steering_output_length", 128) or 128)
+
+    # Build a minimal dataframe expected by predict_steer.
+    # 'output' is not used for accuracy scoring; keep it as empty string.
+    df = pd.DataFrame({
+        "input": prompts,
+        "output": ["" for _ in prompts],
+        "input_concept": ["Basic Arithmetic Reasoning" for _ in prompts],
+        "concept_id": [0 for _ in prompts],
+        "factor": [1.0 for _ in prompts],
+        "input_id": list(range(len(prompts))),
+    })
+
+    # ---- Set prefix_length for chat models ----
+    prefix_length = 1
+    try:
+        if args.model_name in CHAT_MODELS:
+            prefix_length = get_prefix_length(tokenizer)
+    except Exception:
+        pass
+
+    results = benchmark_model.predict_steer(
+        df,
+        concept_id=0,
+        sae_link=None,
+        sae_id=None,
+        batch_size=batch_size,
+        eval_output_length=eval_output_length,
         temperature=0.0,
+        prefix_length=prefix_length,
+        positions=hs_args.intervention_positions,
+        use_synergy=False,
+        disable_neuronpedia_max_act=getattr(args, "disable_neuronpedia_max_act", False),
         intervene_on_prompt=True,
+        return_vector=False,
     )
+
+    # Prefer the steered generation key used elsewhere in this repo.
+    if "steered_generation" in results:
+        outputs = results["steered_generation"]
+    elif "generation" in results:
+        outputs = results["generation"]
+    elif "output" in results:
+        outputs = results["output"]
+    else:
+        raise KeyError(
+            f"Unexpected HyperSteer.predict_steer result keys: {list(results.keys())}. "
+            "Expected one of: steered_generation, generation, output."
+        )
 
     assert benchmark_model._sanity_hook_called, (
         "Sanity check failed: HyperSteer hook never fired during GSM8K inference."
