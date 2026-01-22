@@ -535,14 +535,21 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
         # We default to steering a single "concept slot" (concept_id=0) using a chosen concept prompt.
         if not hasattr(args, "concept_prompt") or args.concept_prompt is None:
             args.concept_prompt = "Basic Arithmetic Reasoning"
-        # Warn if the requested concept is not present in the training slice
+        # If the requested concept isn't present in the training slice, auto-pick the most frequent concept.
         if args.concept_prompt is not None:
-            if (hf_df["output_concept"] == args.concept_prompt).sum() == 0:
+            target_concept = str(args.concept_prompt).strip()
+            present = (hf_df["output_concept"].astype(str).str.strip() == target_concept).sum()
+            if present == 0:
+                # Pick the most frequent concept in the slice to ensure non-empty eval data.
+                vc = hf_df["output_concept"].astype(str).str.strip().value_counts()
+                if len(vc) == 0:
+                    raise ValueError("[HF-only steering] No output_concept values found in HF training slice.")
+                fallback = str(vc.index[0])
                 logger.warning(
-                    f"[Warn] HF-only steering: concept_prompt='{args.concept_prompt}' has 0 rows "
-                    f"in the first {len(hf_df)} training examples. "
-                    "Steering DF will be empty unless you choose a concept present in that slice."
+                    f"[Warn] HF-only steering: concept_prompt='{target_concept}' has 0 rows in the first {len(hf_df)} "
+                    f"training examples. Falling back to concept_prompt='{fallback}'."
                 )
+                args.concept_prompt = fallback
     layer = int(args.steering_layer) if args.steering_layer is not None else config["layer"] if config else 0  # default layer for prompt baselines
     steering_layers = args.steering_layers if args.steering_layers is not None else [layer]
     steering_factors = args.steering_factors
@@ -751,11 +758,10 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                 int(num_of_examples) if num_of_examples is not None else 0
             )
             if len(concept_rows) == 0:
-                logger.warning(
-                    f"[Warn] No HF rows found for output_concept='{target_concept}' "
-                    f"within the first {len(hf_df)} rows (training slice). Skipping."
+                raise ValueError(
+                    f"[HF-only steering] No HF rows found for output_concept='{target_concept}' "
+                    f"within the first {len(hf_df)} rows (training slice), even after fallback selection."
                 )
-                break
 
             factors = steering_factors if steering_factors is not None else [1.0]
 
@@ -781,6 +787,13 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                 steering_factors, steering_datasets, args, generate_args
             )
             data_per_concept[concept_id] = (current_df, sae_link, sae_id)
+
+    # In HF-only mode, we may skip concepts with no data; only process those we built.
+    if len(data_per_concept) == 0:
+        logger.warning("[HF-only steering] No data_per_concept entries were created; nothing to run. Exiting.")
+        return
+
+    my_concept_ids = [cid for cid in my_concept_ids if cid in data_per_concept]
     
     # Preload models that are shared across concepts, like HyperSteer.
     preloaded_models = dict()
