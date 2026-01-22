@@ -108,6 +108,25 @@ def load_metadata_flatten(metadata_path):
             metadata += [flatten_data]  # Return the metadata as is
     return metadata
 
+# --- Helper: Load concepts directly from HF dataset if no metadata.jsonl ---
+def load_hf_concepts(dataset_name):
+    """
+    Load concept registry directly from an HF dataset.
+    Returns:
+        dataset        : full HF dataset
+        concept_ids    : sorted list of unique concept_ids
+        num_concepts   : max(concept_id) + 1
+        concept_map    : dict[int -> concept_name]
+    """
+    ds = load_dataset(dataset_name, split="train")
+    concept_ids = sorted(set(ds["concept_id"]))
+    num_concepts = max(concept_ids) + 1
+    concept_map = {}
+    for cid in concept_ids:
+        row = next(x for x in ds if x["concept_id"] == cid)
+        concept_map[cid] = row.get("output_concept", f"concept_{cid}")
+    return ds, concept_ids, num_concepts, concept_map
+
 
 def save(
     dump_dir, partition,
@@ -398,7 +417,22 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     overwrite_inference_dump_dir = Path(args.overwrite_inference_dump_dir) if args.overwrite_inference_dump_dir is not None else Path(dump_dir) / "inference"
     num_of_examples = args.steering_num_of_examples
     config = load_config(train_dir)
-    metadata = load_metadata_flatten(data_dir)
+    # --- Load metadata.jsonl if available, else load from HF dataset ---
+    metadata_path = Path(data_dir) / METADATA_FILE
+    if metadata_path.exists():
+        metadata = load_metadata_flatten(data_dir)
+        concept_ids = [metadata[i]["concept_id"] for i in range(len(metadata))]
+        num_concepts = len(metadata)
+        concept_name_map = {m["concept_id"]: m["concept"] for m in metadata}
+    else:
+        logger.warning(
+            "[Info] metadata.jsonl not found — loading concepts from HF dataset "
+            "'vennemeyerd/axbench-reasoning'."
+        )
+        hf_dataset, concept_ids, num_concepts, concept_name_map = load_hf_concepts(
+            "vennemeyerd/axbench-reasoning"
+        )
+        metadata = None
     layer = int(args.steering_layer) if args.steering_layer is not None else config["layer"] if config else 0  # default layer for prompt baselines
     steering_layers = args.steering_layers if args.steering_layers is not None else [layer]
     steering_factors = args.steering_factors
@@ -408,8 +442,8 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     last_concept_id_processed = state.get("last_concept_id", None) if state else None
     logger.warning(f"Rank {rank} last concept_id processed: {last_concept_id_processed}")
 
-    # Get list of all concept_ids
-    concept_ids = [metadata[i]["concept_id"] for i in range(len(metadata))]
+    # Get list of all concept_ids (now always sorted unique)
+    concept_ids = sorted(set(concept_ids))
 
     # Partition concept_ids among ranks sequentially
     concept_ids_per_rank = partition_concept_ids(concept_ids, world_size)
@@ -561,10 +595,11 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
         if model_name in STEERING_WITH_SHARED_MODELS:
             model_class = getattr(axbench, model_name)
             logger.warning(f"Loading {model_class} on {device}.")
-            
             benchmark_model = model_class(
-                model_instance, tokenizer, layer=layer,
-                low_rank_dimension=len(metadata),
+                model_instance,
+                tokenizer,
+                layer=layer,
+                low_rank_dimension=num_concepts,
                 device=device,
                 training_args=training_args.models[model_name],
                 lm_model_name=training_args.model_name,
@@ -572,10 +607,15 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
             # --- Sanity: Add a flag to check if HyperSteer hook is called ---
             benchmark_model._sanity_hook_called = False
             benchmark_model.load(
-                dump_dir=train_dir, low_rank_dimension=1, mode="steering", 
+                dump_dir=train_dir, low_rank_dimension=1, mode="steering",
                 hypernet_initialize_from_pretrained=training_args.models[model_name].hypernet_initialize_from_pretrained,
                 hypernet_name_or_path=training_args.models[model_name].hypernet_name_or_path,
                 num_hidden_layers=training_args.models[model_name].num_hidden_layers,
+            )
+            # --- Enforce HyperSteer concept-space correctness ---
+            assert benchmark_model.ax.low_rank_dimension >= num_concepts, (
+                f"HyperSteer low_rank_dimension={benchmark_model.ax.low_rank_dimension} "
+                f"is smaller than num_concepts={num_concepts}"
             )
             # --- After load, wrap the ax.forward to fire the sanity flag ---
             if hasattr(benchmark_model, "ax"):
@@ -588,11 +628,18 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
 
     # Now loop over concept_ids and use preloaded models
     for concept_id in my_concept_ids:
+        # --- Sanity check: warn if steering with HF concept ---
+        if metadata is None:
+            concept_name = concept_name_map.get(concept_id, None)
+            logger.warning(
+                f"[SanityCheck] Steering with concept_id={concept_id} "
+                f"({concept_name}) from HF dataset."
+            )
         current_df, sae_link, sae_id = data_per_concept[concept_id]
         for model_name in args.models:
             if model_name in STEERING_EXCLUDE_MODELS:
                 continue
-            
+
             if model_name not in STEERING_WITH_SHARED_MODELS:
                 model_class = getattr(axbench, model_name)
                 logger.warning(f"Loading {model_class} on {device}.")
@@ -600,7 +647,7 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                 benchmark_model = model_class(
                     model_instance, tokenizer, layer=layer,
                     training_args=training_args.models[model_name] if model_name not in {"PromptSteering", "GemmaScopeSAE"} else None, # we init with training args as well
-                    low_rank_dimension=len(metadata),
+                    low_rank_dimension=num_concepts,
                     device=device, steering_layers=steering_layers,
                 )
                 if model_name in {"PromptSteering", "GemmaScopeSAE"}:
@@ -608,7 +655,7 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                 else:
                     lr = training_args.models[model_name].low_rank_dimension if training_args.models[model_name].low_rank_dimension else 1
                 benchmark_model.load(
-                    dump_dir=train_dir, sae_path=metadata[0]["ref"], 
+                    dump_dir=train_dir, sae_path=metadata[0]["ref"] if metadata is not None else None,
                     mode="steering",
                     priority_mode="compute_priority",
                     intervention_type=args.steering_intervention_type,
@@ -627,27 +674,28 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                             benchmark_model.ax.to(torch.bfloat16)
             else:
                 benchmark_model = preloaded_models[model_name]
-                
+
                 benchmark_model.to(device)
                 if hasattr(benchmark_model, 'ax') and args.use_bf16:
                     benchmark_model.ax.eval()
                     benchmark_model.ax.to(torch.bfloat16)
-                
-            # Pre-compute mean activations once
+
+            # Pre-compute mean activations once, only if metadata is present
             if model_name not in {"LoReFT", "BoW"} and model_name not in LATENT_EXCLUDE_MODELS:
-                benchmark_model.pre_compute_mean_activations(
-                    os.path.join(dump_dir, "inference"), 
-                    master_data_dir=args.master_data_dir,
-                    disable_neuronpedia_max_act=args.disable_neuronpedia_max_act,
-                    metadata=metadata,
-                )
+                if metadata is not None:
+                    benchmark_model.pre_compute_mean_activations(
+                        os.path.join(dump_dir, "inference"),
+                        master_data_dir=args.master_data_dir,
+                        disable_neuronpedia_max_act=args.disable_neuronpedia_max_act,
+                        metadata=metadata,
+                    )
             unique_concept_ids = list(set(current_df["concept_id"].tolist()))
             logger.warning(f"Inference steering with {model_name} on {device} for concept {concept_id}.")
             # Run prediction
             results = benchmark_model.predict_steer(
                 current_df, concept_id=unique_concept_ids[0] if len(unique_concept_ids) == 1 else unique_concept_ids, sae_link=None, sae_id=None,
                 batch_size=int(args.steering_batch_size),
-                eval_output_length=int(args.steering_output_length), 
+                eval_output_length=int(args.steering_output_length),
                 temperature=float(args.temperature),
                 prefix_length=prefix_length,
                 positions=training_args.models[model_name].intervention_positions if model_name not in {"PromptSteering", "GemmaScopeSAE"} else None,
@@ -668,12 +716,12 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
             # Store the results in current_df
             for k, v in results.items():
                 current_df[f"{model_name}_{k}"] = v
-                
+
             if model_name not in STEERING_WITH_SHARED_MODELS:
                 del benchmark_model
             else:
                 benchmark_model = benchmark_model.to("cpu") # move shared model to cpu to save memory
-                
+
             torch.cuda.empty_cache()
         save(overwrite_inference_dump_dir, 'steering', current_df, rank)
         logger.warning(f"Saved inference results for concept {concept_id} to rank_{rank}_steering_data.parquet")
