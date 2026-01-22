@@ -140,6 +140,63 @@ def load_hf_concepts(dataset_name):
     logger.warning(f"[Info] Loaded {len(concept_ids)} concepts from HF dataset '{dataset_name}'.")
     return ds, concept_ids, num_concepts, concept_map
 
+# --- Helper: Extract max_training_examples from training_args/config ---
+def _extract_hypersteer_max_training_examples(training_args, config):
+    """
+    Best-effort extraction of HyperSteer max_training_examples from either
+    TrainingArgs (if present) or the saved train config.json.
+    Returns int or None.
+    """
+    # 1) Try TrainingArgs (may be missing if schema drops the field)
+    try:
+        hs = training_args.models.get("HyperSteer", None)
+        if hs is not None and getattr(hs, "max_training_examples", None):
+            return int(getattr(hs, "max_training_examples"))
+    except Exception:
+        pass
+
+    # 2) Try common locations in config.json
+    if isinstance(config, dict):
+        # a) config["models"]["HyperSteer"]["max_training_examples"]
+        try:
+            v = config.get("models", {}).get("HyperSteer", {}).get("max_training_examples", None)
+            if v is not None:
+                return int(v)
+        except Exception:
+            pass
+        # b) config["train"]["models"]["HyperSteer"]["max_training_examples"]
+        try:
+            v = config.get("train", {}).get("models", {}).get("HyperSteer", {}).get("max_training_examples", None)
+            if v is not None:
+                return int(v)
+        except Exception:
+            pass
+
+        # c) last resort: recursive search for the key
+        def _recurse(obj):
+            if isinstance(obj, dict):
+                if "max_training_examples" in obj:
+                    return obj["max_training_examples"]
+                for vv in obj.values():
+                    out = _recurse(vv)
+                    if out is not None:
+                        return out
+            elif isinstance(obj, list):
+                for vv in obj:
+                    out = _recurse(vv)
+                    if out is not None:
+                        return out
+            return None
+
+        v = _recurse(config)
+        if v is not None:
+            try:
+                return int(v)
+            except Exception:
+                return None
+
+    return None
+
 
 def save(
     dump_dir, partition,
@@ -453,10 +510,26 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
         for col in ["input", "output", "output_concept", "concept_id"]:
             if col not in hf_df.columns:
                 raise ValueError(f"HF dataset missing required column: {col}")
+        # Respect training-time max_training_examples when training used only a prefix of the HF dataset.
+        hs_max_train = _extract_hypersteer_max_training_examples(training_args, config)
+        if hs_max_train is not None:
+            hf_df = hf_df.head(hs_max_train).reset_index(drop=True)
+            logger.warning(
+                f"[Info] HF-only steering: restricting HF examples to the first "
+                f"{hs_max_train} rows to match HyperSteer training (max_training_examples)."
+            )
         # In HF-only mode, HyperSteer may be trained with low_rank_dimension=1.
         # We default to steering a single "concept slot" (concept_id=0) using a chosen concept prompt.
         if not hasattr(args, "concept_prompt") or args.concept_prompt is None:
             args.concept_prompt = "Basic Arithmetic Reasoning"
+        # Warn if the requested concept is not present in the training slice
+        if args.concept_prompt is not None:
+            if (hf_df["output_concept"] == args.concept_prompt).sum() == 0:
+                logger.warning(
+                    f"[Warn] HF-only steering: concept_prompt='{args.concept_prompt}' has 0 rows "
+                    f"in the first {len(hf_df)} training examples. "
+                    "Steering DF will be empty unless you choose a concept present in that slice."
+                )
     layer = int(args.steering_layer) if args.steering_layer is not None else config["layer"] if config else 0  # default layer for prompt baselines
     steering_layers = args.steering_layers if args.steering_layers is not None else [layer]
     steering_factors = args.steering_factors
@@ -641,7 +714,10 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                 int(num_of_examples) if num_of_examples is not None else 0
             )
             if len(concept_rows) == 0:
-                # Skip concepts that have no rows in the HF data
+                logger.warning(
+                    f"[Warn] No HF rows found for output_concept='{args.concept_prompt}' "
+                    f"within the first {len(hf_df)} rows (training slice). Skipping."
+                )
                 continue
 
             factors = steering_factors if steering_factors is not None else [1.0]
