@@ -45,6 +45,16 @@ STEERING_EXCLUDE_MODELS = {"IntegratedGradients", "InputXGradients", "PromptDete
 LATENT_EXCLUDE_MODELS = {"PromptSteering", "PromptBaseline", "DiReFT", "LoReFT", "LoRA", "SFT", "HyperSteer"}
 LATENT_PROMPT_PREFIX = "Generate a random sentence."
 
+# --------------------- Benchmark Prompt Registry ---------------------
+BENCHMARK_PROMPTS = {
+    "gsm8k": {
+        "base": "Question:\n{question}\n\nAnswer:",
+        "steering": "Question:\n{question}\n\nAnswer:",
+        "concept": "Basic Arithmetic Reasoning",
+    },
+    # Future benchmarks can be added here
+}
+
 def load_config(config_path):
     """
     Load metadata from a JSON lines file.
@@ -211,16 +221,20 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
         batch_size=getattr(args, "benchmark_batch_size", 8)
     )
 
+    # Use centralized benchmark prompt registry
+    prompt_cfg = BENCHMARK_PROMPTS.get(args.benchmark)
+    if prompt_cfg is None:
+        raise ValueError(f"No prompt configuration found for benchmark: {args.benchmark}")
+
+    template = prompt_cfg["steering"] if getattr(args, "use_steering", False) else prompt_cfg["base"]
+    prompts = [
+        template.format(question=ex["question"])
+        for ex in dataset_list
+    ]
+    # If steering, set concept prompt for downstream use (e.g. HyperSteer)
     if getattr(args, "use_steering", False):
-        prompts = [
-            f"Question:\n{ex['question']}\n\nLet’s think step by step.\nAnswer:"
-            for ex in dataset_list
-        ]
-    else:
-        prompts = [
-            f"Question:\n{ex['question']}\n\nAnswer:"
-            for ex in dataset_list
-        ]
+        concept_prompt = prompt_cfg.get("concept")
+        args.concept_prompt = concept_prompt
 
     outputs = runner.run_batches(prompts)
 
