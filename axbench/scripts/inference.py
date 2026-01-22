@@ -501,6 +501,9 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
     except Exception:
         pass
 
+    # Ensure temperature is set and valid (Transformers requires temperature > 0)
+    if getattr(args, "temperature", None) is None:
+        args.temperature = 1.0
     results = benchmark_model.predict_steer(
         df,
         concept_id=0,
@@ -508,7 +511,9 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         sae_id=None,
         batch_size=batch_size,
         eval_output_length=eval_output_length,
-        temperature=0.0,
+        # Transformers requires temperature > 0. For greedy decoding, keep do_sample=False
+        # (handled inside model.generate); temperature is ignored when not sampling, but must be valid.
+        temperature=float(getattr(args, "temperature", 1.0)) if float(getattr(args, "temperature", 1.0)) > 0 else 1.0,
         prefix_length=prefix_length,
         positions=hs_args.intervention_positions,
         use_synergy=False,
