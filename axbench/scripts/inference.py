@@ -267,7 +267,7 @@ class BenchmarkRunner:
         self.device = device
         self.batch_size = batch_size
 
-    def run_batches(self, prompts, max_new_tokens=512):
+    def run_batches(self, prompts, max_new_tokens=256):
         results = []
         for i in range(0, len(prompts), self.batch_size):
             batch = prompts[i:i+self.batch_size]
@@ -278,15 +278,51 @@ class BenchmarkRunner:
                 truncation=True
             ).to(self.device)
 
+            # Custom stopping criteria for GSM8K: stop after '####'
+            from transformers import StoppingCriteria, StoppingCriteriaList
+            class GSM8KStop(StoppingCriteria):
+                def __init__(self, tokenizer, start_len):
+                    super().__init__()
+                    self.tokenizer = tokenizer
+                    self.start_len = start_len
+                def __call__(self, input_ids, scores, **kwargs):
+                    # Only look at newly generated tokens
+                    for seq in input_ids:
+                        decoded = self.tokenizer.decode(seq[self.start_len:], skip_special_tokens=True)
+                        if "####" in decoded:
+                            return True
+                    return False
+
+            stopping_criteria = StoppingCriteriaList([GSM8KStop(self.tokenizer, toks.input_ids.shape[1])])
+
             with torch.no_grad():
                 outputs = self.model.generate(
                     **toks,
                     max_new_tokens=max_new_tokens,
                     temperature=0.0,
-                    do_sample=False
+                    do_sample=False,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    stopping_criteria=stopping_criteria,
                 )
             decoded = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            results.extend(decoded)
+            # Post-process: Truncate after first '####' line (inclusive)
+            processed = []
+            for d in decoded:
+                idx = d.find("####")
+                if idx == -1:
+                    processed.append(d)
+                else:
+                    # Keep up to and including the line containing '####'
+                    after = d[idx:]
+                    # Find the end of the line after '####'
+                    # If after contains a newline, cut after that; else, to the end.
+                    nl = after.find("\n")
+                    if nl != -1:
+                        processed.append(d[:idx+nl])
+                    else:
+                        processed.append(d[:idx+len(after)])
+            results.extend(processed)
         return results
 
 
@@ -306,15 +342,19 @@ def parse_gsm8k_gold(answer):
     return int(nums[-1])
 
 def parse_gsm8k_pred(text):
-    # Preferred: explicit GSM8K delimiter
-    if "####" in text:
-        tail = text.split("####")[-1]
-        nums = re.findall(r"-?\d+", tail.replace(",", ""))
-        return int(nums[0]) if nums else None
-
-    # Fallback: last number in the text
-    nums = re.findall(r"-?\d+", text.replace(",", ""))
-    return int(nums[-1]) if nums else None
+    """
+    Hardened GSM8K prediction parser.
+    Returns the first integer found on a line beginning with '####', else None.
+    """
+    # Find the first line that matches ^####\s*(-?\d+)
+    for line in text.splitlines():
+        m = re.match(r"^####\s*(-?\d+)", line.strip())
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                continue
+    return None
 
 
 # --------------------- Benchmark Inference Function ---------------------
@@ -379,7 +419,7 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
 
     outputs = runner.run_batches(
         prompts,
-        max_new_tokens=int(getattr(args, "benchmark_output_length", 512))
+        max_new_tokens=int(getattr(args, "benchmark_output_length", 256))
     )
 
     correct = 0
@@ -395,7 +435,20 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
 
     for ex, out in pbar:
         gold = parse_gsm8k_gold(ex["answer"])
-        pred = parse_gsm8k_pred(out)
+        # Clamp pathological generations: if response > 4x prompt, set pred=None
+        prompt = ex["question"]
+        # Use the actual prompt string used in generation
+        # Find corresponding prompt string
+        # Here, prompts list is in order, so index matches
+        prompt_str = prompts[total]
+        response_truncated = False
+        pred = None
+        resp = out
+        if len(resp) > 4 * len(prompt_str):
+            response_truncated = True
+            pred = None
+        else:
+            pred = parse_gsm8k_pred(resp)
         # Treat None as incorrect answer
         is_correct = (pred == gold) and (gold is not None) and (pred is not None)
         correct += int(is_correct)
@@ -405,7 +458,9 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
             "question": ex["question"],
             "gold": gold,
             "pred": pred,
-            "correct": is_correct
+            "correct": is_correct,
+            "response_truncated": response_truncated,
+            "response_length": len(resp),
         })
 
         if total > 0:
@@ -498,7 +553,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
     # ---- Run steered generation via predict_steer ----
     # HyperSteer exposes predict_steer (used by infer_steering), not predict_generate.
     batch_size = int(getattr(args, "benchmark_batch_size", 8))
-    eval_output_length = int(getattr(args, "steering_output_length", 512) or 512)
+    eval_output_length = int(getattr(args, "steering_output_length", 256) or 256)
 
     # Build a minimal dataframe expected by predict_steer.
     # 'output' is not used for accuracy scoring; keep it as empty string.
@@ -529,14 +584,12 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         sae_id=None,
         batch_size=batch_size,
         eval_output_length=eval_output_length,
-        # Transformers requires temperature > 0. For greedy decoding, keep do_sample=False
-        # (handled inside model.generate); temperature is ignored when not sampling, but must be valid.
         temperature=float(getattr(args, "temperature", 1.0)) if float(getattr(args, "temperature", 1.0)) > 0 else 1.0,
         prefix_length=prefix_length,
         positions=hs_args.intervention_positions,
         use_synergy=False,
         disable_neuronpedia_max_act=getattr(args, "disable_neuronpedia_max_act", False),
-        intervene_on_prompt=True,
+        intervene_on_prompt=False,  # Only intervene during answer generation, not prompt
         return_vector=False,
     )
 
@@ -561,9 +614,17 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
     correct, total = 0, 0
     records = []
 
-    for ex, out in zip(dataset, outputs):
+    for idx, (ex, out) in enumerate(zip(dataset, outputs)):
         gold = parse_gsm8k_gold(ex["answer"])
-        pred = parse_gsm8k_pred(out)
+        prompt_str = prompts[idx]
+        response_truncated = False
+        pred = None
+        resp = out
+        if len(resp) > 4 * len(prompt_str):
+            response_truncated = True
+            pred = None
+        else:
+            pred = parse_gsm8k_pred(resp)
         ok = (gold is not None) and (pred == gold)
         correct += int(ok)
         total += 1
@@ -573,6 +634,8 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
             "pred": pred,
             "correct": ok,
             "response": out,
+            "response_truncated": response_truncated,
+            "response_length": len(resp),
         })
 
     acc = correct / max(1, total)
