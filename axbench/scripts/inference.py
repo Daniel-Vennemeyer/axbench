@@ -119,12 +119,25 @@ def load_hf_concepts(dataset_name):
         concept_map    : dict[int -> concept_name]
     """
     ds = load_dataset(dataset_name, split="train")
-    concept_ids = sorted(set(ds["concept_id"]))
-    num_concepts = max(concept_ids) + 1
+    # Use HF's optimized unique() when available
+    try:
+        concept_ids = sorted(ds.unique("concept_id"))
+    except Exception:
+        concept_ids = sorted(set(ds["concept_id"]))
+
+    num_concepts = (max(concept_ids) + 1) if concept_ids else 0
+
+    # Build concept_id -> output_concept map in ONE pass (first occurrence wins)
     concept_map = {}
-    for cid in concept_ids:
-        row = next(x for x in ds if x["concept_id"] == cid)
-        concept_map[cid] = row.get("output_concept", f"concept_{cid}")
+    # Fast path: iterate indices to avoid Python generator restarting costs
+    for i in range(len(ds)):
+        cid = ds[i]["concept_id"]
+        if cid not in concept_map:
+            concept_map[cid] = ds[i].get("output_concept", f"concept_{cid}")
+            if len(concept_map) == len(concept_ids):
+                break
+
+    logger.warning(f"[Info] Loaded {len(concept_ids)} concepts from HF dataset '{dataset_name}'.")
     return ds, concept_ids, num_concepts, concept_map
 
 
