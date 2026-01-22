@@ -419,6 +419,112 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
             }, f, indent=2)
 
 
+# --------------------- Benchmark Steered Inference Function ---------------------
+
+def infer_benchmark_steered(args, rank, world_size, device, logger, training_args):
+    assert world_size == 1, "benchmark_steered currently supports single-process only"
+
+    dataset = load_dataset("gsm8k", "main", split="test")
+    if getattr(args, "max_questions", None) is not None:
+        dataset = dataset.select(range(min(len(dataset), args.max_questions)))
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer.padding_side = "left"
+
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name,
+        torch_dtype=torch.bfloat16 if getattr(args, "use_bf16", False) else None,
+        device_map=device
+    ).eval()
+
+    # ---- Load HyperSteer ----
+    from axbench.models.hypersteer import HyperSteer
+
+    hs_args = training_args.models["HyperSteer"]
+
+    benchmark_model = HyperSteer(
+        model,
+        tokenizer,
+        layer=args.steering_layer,
+        low_rank_dimension=1,
+        device=device,
+        training_args=hs_args,
+        lm_model_name=training_args.model_name,
+    )
+
+    benchmark_model._sanity_hook_called = False
+
+    benchmark_model.load(
+        dump_dir=args.train_dir,
+        low_rank_dimension=1,
+        mode="steering",
+        hypernet_initialize_from_pretrained=hs_args.hypernet_initialize_from_pretrained,
+        hypernet_name_or_path=hs_args.hypernet_name_or_path,
+        num_hidden_layers=hs_args.num_hidden_layers,
+    )
+
+    # Wrap hook to assert steering fires
+    orig_forward = benchmark_model.ax.forward
+    def _wrapped_forward(*a, **kw):
+        benchmark_model._sanity_hook_called = True
+        return orig_forward(*a, **kw)
+    benchmark_model.ax.forward = _wrapped_forward
+
+    # ---- Build GSM8K prompts ----
+    prompt_cfg = BENCHMARK_PROMPTS["gsm8k"]
+    prompts = [
+        prompt_cfg["base"].format(question=ex["question"])
+        for ex in dataset
+    ]
+
+    outputs = benchmark_model.predict_generate(
+        prompts,
+        batch_size=getattr(args, "benchmark_batch_size", 8),
+        eval_output_length=128,
+        temperature=0.0,
+        intervene_on_prompt=True,
+    )
+
+    assert benchmark_model._sanity_hook_called, (
+        "Sanity check failed: HyperSteer hook never fired during GSM8K inference."
+    )
+
+    # ---- Score accuracy ----
+    correct, total = 0, 0
+    records = []
+
+    for ex, out in zip(dataset, outputs):
+        gold = parse_gsm8k_gold(ex["answer"])
+        pred = parse_gsm8k_pred(out)
+        ok = (gold is not None) and (pred == gold)
+        correct += int(ok)
+        total += 1
+        records.append({
+            "question": ex["question"],
+            "gold": gold,
+            "pred": pred,
+            "correct": ok,
+        })
+
+    acc = correct / max(1, total)
+    logger.warning(f"[Benchmark:GSM8K+Steering] Accuracy={acc:.4f} ({correct}/{total})")
+
+    out_dir = Path(args.dump_dir) / "benchmark_steered"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(out_dir / "gsm8k_results.jsonl", "w") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+
+    with open(out_dir / "gsm8k_summary.json", "w") as f:
+        json.dump({
+            "benchmark": "gsm8k",
+            "accuracy": acc,
+            "num_questions": total,
+            "steered": True,
+        }, f, indent=2)
+
+
 def create_data_latent(dataset_factory, metadata, concept_id, num_of_examples, args):
     # prepare concept related data.
     concept = metadata[concept_id]["concept"]
@@ -1679,6 +1785,10 @@ def main():
             infer_steering(inference_args, rank, world_size, device, logger, training_args, generate_args, suppress_eval_dir=suppress_eval_dir)
         elif inference_args.mode == "benchmark":
             infer_benchmark(
+                inference_args, rank, world_size, device, logger, training_args
+            )
+        elif inference_args.mode == "benchmark_steered":
+            infer_benchmark_steered(
                 inference_args, rank, world_size, device, logger, training_args
             )
     finally:
