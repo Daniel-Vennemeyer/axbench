@@ -50,17 +50,20 @@ BENCHMARK_PROMPTS = {
     "gsm8k": {
         "base": (
             "Question:\n{question}\n\n"
-            "Please reason step by step, showing all intermediate calculations clearly, "
-            "and then give the final numeric answer.\n\nAnswer:"
+            "Please reason step by step.\n"
+            "End your response with:\n"
+            "#### <final numeric answer>\n\n"
+            "Answer:"
         ),
         "steering": (
             "Question:\n{question}\n\n"
-            "Please reason step by step, showing all intermediate calculations clearly, "
-            "and then give the final numeric answer.\n\nAnswer:"
+            "Please reason step by step.\n"
+            "End your response with:\n"
+            "#### <final numeric answer>\n\n"
+            "Answer:"
         ),
         "concept": "Basic Arithmetic Reasoning",
     },
-    # Future benchmarks can be added here
 }
 
 def load_config(config_path):
@@ -264,7 +267,7 @@ class BenchmarkRunner:
         self.device = device
         self.batch_size = batch_size
 
-    def run_batches(self, prompts, max_new_tokens=128):
+    def run_batches(self, prompts, max_new_tokens=512):
         results = []
         for i in range(0, len(prompts), self.batch_size):
             batch = prompts[i:i+self.batch_size]
@@ -303,10 +306,14 @@ def parse_gsm8k_gold(answer):
     return int(nums[-1])
 
 def parse_gsm8k_pred(text):
+    # Preferred: explicit GSM8K delimiter
     if "####" in text:
-        nums = re.findall(r"-?\d+", text.split("####")[-1])
+        tail = text.split("####")[-1]
+        nums = re.findall(r"-?\d+", tail.replace(",", ""))
         return int(nums[0]) if nums else None
-    nums = re.findall(r"-?\d+", text)
+
+    # Fallback: last number in the text
+    nums = re.findall(r"-?\d+", text.replace(",", ""))
     return int(nums[-1]) if nums else None
 
 
@@ -370,7 +377,10 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
         concept_prompt = prompt_cfg.get("concept")
         args.concept_prompt = concept_prompt
 
-    outputs = runner.run_batches(prompts)
+    outputs = runner.run_batches(
+        prompts,
+        max_new_tokens=int(getattr(args, "benchmark_output_length", 512))
+    )
 
     correct = 0
     total = 0
@@ -488,7 +498,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
     # ---- Run steered generation via predict_steer ----
     # HyperSteer exposes predict_steer (used by infer_steering), not predict_generate.
     batch_size = int(getattr(args, "benchmark_batch_size", 8))
-    eval_output_length = int(getattr(args, "steering_output_length", 128) or 128)
+    eval_output_length = int(getattr(args, "steering_output_length", 512) or 512)
 
     # Build a minimal dataframe expected by predict_steer.
     # 'output' is not used for accuracy scoring; keep it as empty string.
