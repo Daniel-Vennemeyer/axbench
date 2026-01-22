@@ -437,6 +437,7 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
         concept_ids = [metadata[i]["concept_id"] for i in range(len(metadata))]
         num_concepts = len(metadata)
         concept_name_map = {m["concept_id"]: m["concept"] for m in metadata}
+        hf_df = None
     else:
         logger.warning(
             "[Info] metadata.jsonl not found — loading concepts from HF dataset "
@@ -446,6 +447,12 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
             "vennemeyerd/axbench-reasoning"
         )
         metadata = None
+        # Materialize HF dataset to pandas for fast per-concept slicing (58k rows is fine)
+        hf_df = hf_dataset.to_pandas()
+        # Ensure required columns exist
+        for col in ["input", "output", "output_concept", "concept_id"]:
+            if col not in hf_df.columns:
+                raise ValueError(f"HF dataset missing required column: {col}")
     layer = int(args.steering_layer) if args.steering_layer is not None else config["layer"] if config else 0  # default layer for prompt baselines
     steering_layers = args.steering_layers if args.steering_layers is not None else [layer]
     steering_factors = args.steering_factors
@@ -457,6 +464,9 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
 
     # Get list of all concept_ids (now always sorted unique)
     concept_ids = sorted(set(concept_ids))
+    if args.max_concepts is not None:
+        concept_ids = concept_ids[: int(args.max_concepts)]
+        logger.warning(f"[Info] Capping to max_concepts={args.max_concepts}.")
 
     # Partition concept_ids among ranks sequentially
     concept_ids_per_rank = partition_concept_ids(concept_ids, world_size)
@@ -522,19 +532,23 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
         logger.warning(f"Rank {rank} has no concepts to process. Exiting.")
         return
 
-    # Create a new OpenAI client.
-    lm_client = AsyncOpenAI(
-        api_key=os.environ.get("OPENAI_API_KEY"),
-        timeout=60.0,
-        http_client=httpx.AsyncClient(
-            limits=httpx.Limits(
-                max_keepalive_connections=100,
-                max_connections=1000
+    use_hf_only = metadata is None
+    if not use_hf_only:
+        # Create a new OpenAI client (required for dataset_factory.create_eval_df in AxBench mode)
+        lm_client = AsyncOpenAI(
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            timeout=60.0,
+            http_client=httpx.AsyncClient(
+                limits=httpx.Limits(
+                    max_keepalive_connections=100,
+                    max_connections=1000
+                ),
+                headers={"Connection": "close"},
             ),
-            headers={"Connection": "close"},
-        ),
-        max_retries=3,
-    )
+            max_retries=3,
+        )
+    else:
+        lm_client = None
 
     # Initialize the dataset factory with the tokenizer.
     if "google/gemma-3" in args.steering_model_name:
@@ -551,18 +565,21 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
             has_prompt_steering = True
         else:
             has_prompt_steering = False
-    dataset_factory = SteeringDatasetFactory(
-        tokenizer, dump_dir,
-        master_data_dir=args.master_data_dir, lm_client=lm_client,
-        lm_model=args.lm_model,
-        has_prompt_steering=has_prompt_steering
-    )
+    if not use_hf_only:
+        dataset_factory = SteeringDatasetFactory(
+            tokenizer, dump_dir,
+            master_data_dir=args.master_data_dir, lm_client=lm_client,
+            lm_model=args.lm_model,
+            has_prompt_steering=has_prompt_steering
+        )
+    else:
+        dataset_factory = None
     is_chat_model = True if args.model_name in CHAT_MODELS else False
     prefix_length = 1 # prefix is default to 1 for all models due to the BOS token.
     if is_chat_model:
         prefix_length = get_prefix_length(tokenizer)
         logger.warning(f"Chat model prefix length: {prefix_length}")
-        
+
     # Load model instance onto device
     if args.use_bf16:
         logger.warning(f"Using bfloat16 for model {args.model_name}")
@@ -590,20 +607,48 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     # Prepare data per concept
     data_per_concept = {}
     for concept_id in my_concept_ids:
-        
-        """current_df = pd.read_parquet(f"/nlp/scr/sjd24/merge/axbench/axbench/concept10/prod_2b_l20_v1/debug_data/{concept_id}_steering_data.parquet")
-        sae_link, sae_id = None, None"""
-        
-        current_df, (_, sae_link, sae_id) = create_data_steering(
-            dataset_factory, metadata, concept_id, num_of_examples,
-            steering_factors, steering_datasets, args, generate_args
-        )
-        data_per_concept[concept_id] = (current_df, sae_link, sae_id)
+        if use_hf_only:
+            # Build eval DF directly from HF examples for this concept_id
+            concept_rows = hf_df[hf_df["concept_id"] == concept_id].head(int(num_of_examples) if num_of_examples is not None else 0)
+            if len(concept_rows) == 0:
+                # Skip concepts that have no rows in the HF data
+                continue
+
+            factors = steering_factors if steering_factors is not None else [1.0]
+
+            records = []
+            input_ctr = 0
+            for _, row in concept_rows.iterrows():
+                for f in factors:
+                    records.append({
+                        "input": row["input"],
+                        "output": row["output"],
+                        "input_concept": row.get("output_concept", concept_name_map.get(concept_id, f"concept_{concept_id}")),
+                        "concept_id": int(concept_id),
+                        "factor": float(f),
+                        "input_id": int(input_ctr),
+                    })
+                input_ctr += 1
+
+            current_df = pd.DataFrame.from_records(records)
+            data_per_concept[concept_id] = (current_df, None, None)
+        else:
+            current_df, (_, sae_link, sae_id) = create_data_steering(
+                dataset_factory, metadata, concept_id, num_of_examples,
+                steering_factors, steering_datasets, args, generate_args
+            )
+            data_per_concept[concept_id] = (current_df, sae_link, sae_id)
     
     # Preload models that are shared across concepts, like HyperSteer.
     preloaded_models = dict()
     for model_name in training_args.models.keys():
         if model_name in STEERING_EXCLUDE_MODELS:
+            continue
+        if use_hf_only and model_name != "HyperSteer":
+            logger.warning(
+                f"[Info] HF-only steering mode: skipping model '{model_name}' "
+                "because it may require metadata/SAE refs."
+            )
             continue
         if model_name in STEERING_WITH_SHARED_MODELS:
             model_class = getattr(axbench, model_name)
@@ -651,6 +696,13 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
         current_df, sae_link, sae_id = data_per_concept[concept_id]
         for model_name in args.models:
             if model_name in STEERING_EXCLUDE_MODELS:
+                continue
+
+            if use_hf_only and model_name != "HyperSteer":
+                logger.warning(
+                    f"[Info] HF-only steering mode: skipping model '{model_name}' "
+                    "because it may require metadata/SAE refs."
+                )
                 continue
 
             if model_name not in STEERING_WITH_SHARED_MODELS:
@@ -1434,25 +1486,25 @@ def main():
     else:
         suppress_eval_dir = None
 
-    if inference_args.mode == "latent":
-        infer_latent(inference_args, rank, world_size, device, logger, training_args, generate_args)
-    elif inference_args.mode == "latent_imbalance":
-        infer_latent_imbalance(inference_args, rank, world_size, device, logger, training_args, generate_args)
-    elif inference_args.mode == "latent_on_train_data":
-        infer_latent_on_train_data(inference_args, rank, world_size, device, logger, training_args, generate_args)
-    elif inference_args.mode == "steering":
-        infer_steering(inference_args, rank, world_size, device, logger, training_args, generate_args, suppress_eval_dir=suppress_eval_dir)
-    elif inference_args.mode == "all":
-        infer_latent(inference_args, rank, world_size, device, logger, training_args, generate_args)
-        infer_steering(inference_args, rank, world_size, device, logger, training_args, generate_args, suppress_eval_dir=suppress_eval_dir)
-    elif inference_args.mode == "benchmark":
-        infer_benchmark(
-            inference_args, rank, world_size, device, logger, training_args
-        )
-
-    # Finalize the process group
-    if dist.is_initialized():
-        dist.destroy_process_group()
+    try:
+        if inference_args.mode == "latent":
+            infer_latent(inference_args, rank, world_size, device, logger, training_args, generate_args)
+        elif inference_args.mode == "latent_imbalance":
+            infer_latent_imbalance(inference_args, rank, world_size, device, logger, training_args, generate_args)
+        elif inference_args.mode == "latent_on_train_data":
+            infer_latent_on_train_data(inference_args, rank, world_size, device, logger, training_args, generate_args)
+        elif inference_args.mode == "steering":
+            infer_steering(inference_args, rank, world_size, device, logger, training_args, generate_args, suppress_eval_dir=suppress_eval_dir)
+        elif inference_args.mode == "all":
+            infer_latent(inference_args, rank, world_size, device, logger, training_args, generate_args)
+            infer_steering(inference_args, rank, world_size, device, logger, training_args, generate_args, suppress_eval_dir=suppress_eval_dir)
+        elif inference_args.mode == "benchmark":
+            infer_benchmark(
+                inference_args, rank, world_size, device, logger, training_args
+            )
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
     # Remove handlers to prevent duplication if the script is run multiple times
     logger.removeHandler(console_handler)
