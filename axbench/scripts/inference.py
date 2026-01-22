@@ -453,6 +453,10 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
         for col in ["input", "output", "output_concept", "concept_id"]:
             if col not in hf_df.columns:
                 raise ValueError(f"HF dataset missing required column: {col}")
+        # In HF-only mode, HyperSteer may be trained with low_rank_dimension=1.
+        # We default to steering a single "concept slot" (concept_id=0) using a chosen concept prompt.
+        if not hasattr(args, "concept_prompt") or args.concept_prompt is None:
+            args.concept_prompt = "Basic Arithmetic Reasoning"
     layer = int(args.steering_layer) if args.steering_layer is not None else config["layer"] if config else 0  # default layer for prompt baselines
     steering_layers = args.steering_layers if args.steering_layers is not None else [layer]
     steering_factors = args.steering_factors
@@ -461,6 +465,30 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     state = load_state(args.dump_dir, "steering", rank)
     last_concept_id_processed = state.get("last_concept_id", None) if state else None
     logger.warning(f"Rank {rank} last concept_id processed: {last_concept_id_processed}")
+
+    # If we are in HF-only mode, HyperSteer concept space must match the trained low_rank_dimension.
+    use_hf_only = (metadata is None)
+    trained_hypersteer_dim = None
+    if "HyperSteer" in training_args.models:
+        trained_hypersteer_dim = training_args.models["HyperSteer"].low_rank_dimension or 1
+
+    if use_hf_only:
+        # HyperSteer-only runs often have a single concept slot; map HF examples into concept_id=0.
+        if trained_hypersteer_dim is not None and trained_hypersteer_dim == 1:
+            concept_ids = [0]
+            num_concepts = 1
+            logger.warning(
+                "[Info] HF-only steering: HyperSteer low_rank_dimension=1 detected; "
+                "mapping selected HF examples to concept_id=0."
+            )
+        elif trained_hypersteer_dim is not None:
+            num_concepts = int(trained_hypersteer_dim)
+            # We still default to concept_id=0 for now unless you explicitly extend this.
+            concept_ids = [0]
+            logger.warning(
+                f"[Info] HF-only steering: using trained HyperSteer low_rank_dimension={num_concepts}; "
+                "defaulting to concept_id=0."
+            )
 
     # Get list of all concept_ids (now always sorted unique)
     concept_ids = sorted(set(concept_ids))
@@ -532,7 +560,7 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
         logger.warning(f"Rank {rank} has no concepts to process. Exiting.")
         return
 
-    use_hf_only = metadata is None
+    # use_hf_only already computed above
     if not use_hf_only:
         # Create a new OpenAI client (required for dataset_factory.create_eval_df in AxBench mode)
         lm_client = AsyncOpenAI(
@@ -608,8 +636,10 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     data_per_concept = {}
     for concept_id in my_concept_ids:
         if use_hf_only:
-            # Build eval DF directly from HF examples for this concept_id
-            concept_rows = hf_df[hf_df["concept_id"] == concept_id].head(int(num_of_examples) if num_of_examples is not None else 0)
+            # Select HF rows matching the desired concept prompt, then map to concept_id=0.
+            concept_rows = hf_df[hf_df["output_concept"] == args.concept_prompt].head(
+                int(num_of_examples) if num_of_examples is not None else 0
+            )
             if len(concept_rows) == 0:
                 # Skip concepts that have no rows in the HF data
                 continue
@@ -623,8 +653,8 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                     records.append({
                         "input": row["input"],
                         "output": row["output"],
-                        "input_concept": row.get("output_concept", concept_name_map.get(concept_id, f"concept_{concept_id}")),
-                        "concept_id": int(concept_id),
+                        "input_concept": args.concept_prompt,
+                        "concept_id": 0,
                         "factor": float(f),
                         "input_id": int(input_ctr),
                     })
@@ -657,7 +687,7 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                 model_instance,
                 tokenizer,
                 layer=layer,
-                low_rank_dimension=num_concepts,
+                low_rank_dimension=(trained_hypersteer_dim or num_concepts),
                 device=device,
                 training_args=training_args.models[model_name],
                 lm_model_name=training_args.model_name,
@@ -671,9 +701,10 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                 num_hidden_layers=training_args.models[model_name].num_hidden_layers,
             )
             # --- Enforce HyperSteer concept-space correctness ---
-            assert benchmark_model.ax.low_rank_dimension >= num_concepts, (
+            expected_dim = (trained_hypersteer_dim or num_concepts)
+            assert benchmark_model.ax.low_rank_dimension >= expected_dim, (
                 f"HyperSteer low_rank_dimension={benchmark_model.ax.low_rank_dimension} "
-                f"is smaller than num_concepts={num_concepts}"
+                f"is smaller than expected_dim={expected_dim}"
             )
             # --- After load, wrap the ax.forward to fire the sanity flag ---
             if hasattr(benchmark_model, "ax"):
@@ -688,7 +719,7 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     for concept_id in my_concept_ids:
         # --- Sanity check: warn if steering with HF concept ---
         if metadata is None:
-            concept_name = concept_name_map.get(concept_id, None)
+            concept_name = getattr(args, "concept_prompt", None)
             logger.warning(
                 f"[SanityCheck] Steering with concept_id={concept_id} "
                 f"({concept_name}) from HF dataset."
