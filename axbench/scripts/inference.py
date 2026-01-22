@@ -48,8 +48,16 @@ LATENT_PROMPT_PREFIX = "Generate a random sentence."
 # --------------------- Benchmark Prompt Registry ---------------------
 BENCHMARK_PROMPTS = {
     "gsm8k": {
-        "base": "Question:\n{question}\n\nAnswer:",
-        "steering": "Question:\n{question}\n\nAnswer:",
+        "base": (
+            "Question:\n{question}\n\n"
+            "Please reason step by step, showing all intermediate calculations clearly, "
+            "and then give the final numeric answer.\n\nAnswer:"
+        ),
+        "steering": (
+            "Question:\n{question}\n\n"
+            "Please reason step by step, showing all intermediate calculations clearly, "
+            "and then give the final numeric answer.\n\nAnswer:"
+        ),
         "concept": "Basic Arithmetic Reasoning",
     },
     # Future benchmarks can be added here
@@ -554,6 +562,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
             "gold": gold,
             "pred": pred,
             "correct": ok,
+            "response": out,
         })
 
     acc = correct / max(1, total)
