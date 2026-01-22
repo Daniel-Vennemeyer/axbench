@@ -563,6 +563,16 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
         num_of_examples = 32
         logger.warning("[Info] HF-only steering: steering_num_of_examples was None; defaulting to 32.")
 
+    # Defaults for steering generation parameters
+    if args.steering_batch_size is None:
+        args.steering_batch_size = 8
+        logger.warning("[Info] steering_batch_size was None; defaulting to 8.")
+    if args.steering_output_length is None:
+        # fall back to generic output_length if present, else 128
+        fallback_out = getattr(args, "output_length", None)
+        args.steering_output_length = int(fallback_out) if fallback_out is not None else 128
+        logger.warning(f"[Info] steering_output_length was None; defaulting to {args.steering_output_length}.")
+
     state = load_state(args.dump_dir, "steering", rank)
     last_concept_id_processed = state.get("last_concept_id", None) if state else None
     logger.warning(f"Rank {rank} last concept_id processed: {last_concept_id_processed}")
