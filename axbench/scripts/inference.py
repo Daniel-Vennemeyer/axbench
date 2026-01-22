@@ -282,8 +282,9 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
     correct_t = torch.tensor(correct, device=device)
     total_t = torch.tensor(total, device=device)
 
-    dist.all_reduce(correct_t, op=dist.ReduceOp.SUM)
-    dist.all_reduce(total_t, op=dist.ReduceOp.SUM)
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(correct_t, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_t, op=dist.ReduceOp.SUM)
 
     if rank == 0:
         acc = correct_t.item() / max(1, total_t.item())
