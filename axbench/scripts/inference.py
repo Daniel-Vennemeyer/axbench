@@ -550,10 +550,18 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                     f"training examples. Falling back to concept_prompt='{fallback}'."
                 )
                 args.concept_prompt = fallback
+        logger.warning(f"[Info] HF-only steering: using concept_prompt='{str(args.concept_prompt).strip()}' for eval data.")
     layer = int(args.steering_layer) if args.steering_layer is not None else config["layer"] if config else 0  # default layer for prompt baselines
     steering_layers = args.steering_layers if args.steering_layers is not None else [layer]
     steering_factors = args.steering_factors
     steering_datasets = args.steering_datasets
+
+    # (Optional safety) Ensure num_of_examples defaults to a positive integer in HF-only mode
+    use_hf_only = (metadata is None)
+    if use_hf_only and (num_of_examples is None):
+        # In HF-only mode we need a finite number of examples to build eval data.
+        num_of_examples = 32
+        logger.warning("[Info] HF-only steering: steering_num_of_examples was None; defaulting to 32.")
 
     state = load_state(args.dump_dir, "steering", rank)
     last_concept_id_processed = state.get("last_concept_id", None) if state else None
@@ -750,18 +758,22 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     data_per_concept = {}
     for concept_id in my_concept_ids:
         if use_hf_only:
-            # Select HF rows matching the desired concept prompt, then map to concept_id=0.
-            target_concept = str(args.concept_prompt).strip()
-            concept_rows = hf_df[
-                hf_df["output_concept"].astype(str).str.strip() == target_concept
-            ].head(
+            # HF-only steering: select rows strictly by concept_id (ground truth)
+            concept_rows = hf_df[hf_df["concept_id"] == concept_id].head(
                 int(num_of_examples) if num_of_examples is not None else 0
             )
+
             if len(concept_rows) == 0:
                 raise ValueError(
-                    f"[HF-only steering] No HF rows found for output_concept='{target_concept}' "
-                    f"within the first {len(hf_df)} rows (training slice), even after fallback selection."
+                    f"[HF-only steering] No HF rows found for concept_id={concept_id} "
+                    f"within the first {len(hf_df)} rows (training slice)."
                 )
+
+            # Derive a human-readable label for logging only
+            try:
+                target_concept = str(concept_rows.iloc[0]["output_concept"])
+            except Exception:
+                target_concept = f"concept_{concept_id}"
 
             factors = steering_factors if steering_factors is not None else [1.0]
 
