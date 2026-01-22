@@ -180,7 +180,19 @@ class BenchmarkRunner:
 
 
 def parse_gsm8k_gold(answer):
-    return int(answer.split("####")[-1].strip())
+    """
+    Robustly parse the GSM8K gold answer.
+    Handles commas (e.g. '2,125'), negatives, and stray whitespace.
+    """
+    if "####" in answer:
+        tail = answer.split("####")[-1]
+    else:
+        tail = answer
+
+    nums = re.findall(r"-?\d+", tail.replace(",", ""))
+    if not nums:
+        return None
+    return int(nums[-1])
 
 def parse_gsm8k_pred(text):
     if "####" in text:
@@ -252,7 +264,8 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
     for ex, out in pbar:
         gold = parse_gsm8k_gold(ex["answer"])
         pred = parse_gsm8k_pred(out)
-        is_correct = pred == gold
+        # Treat None as incorrect answer
+        is_correct = (pred == gold) and (gold is not None) and (pred is not None)
         correct += int(is_correct)
         total += 1
 
