@@ -141,7 +141,7 @@ def load_hf_concepts(dataset_name):
     return ds, concept_ids, num_concepts, concept_map
 
 # --- Helper: Extract max_training_examples from training_args/config ---
-def _extract_hypersteer_max_training_examples(training_args, config):
+def _extract_hypersteer_max_training_examples(training_args, config, dump_dir=None):
     """
     Best-effort extraction of HyperSteer max_training_examples from either
     TrainingArgs (if present) or the saved train config.json.
@@ -194,6 +194,17 @@ def _extract_hypersteer_max_training_examples(training_args, config):
                 return int(v)
             except Exception:
                 return None
+
+    # 3) Heuristic: if dump_dir basename ends with "-<int>" (e.g., hypersteer-gemma2b-1000),
+    # treat that as max_training_examples when schema/config does not expose it.
+    try:
+        if dump_dir is not None:
+            base = os.path.basename(str(dump_dir).rstrip("/"))
+            m = re.search(r"-(\d+)$", base)
+            if m:
+                return int(m.group(1))
+    except Exception:
+        pass
 
     return None
 
@@ -511,7 +522,9 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
             if col not in hf_df.columns:
                 raise ValueError(f"HF dataset missing required column: {col}")
         # Respect training-time max_training_examples when training used only a prefix of the HF dataset.
-        hs_max_train = _extract_hypersteer_max_training_examples(training_args, config)
+        hs_max_train = _extract_hypersteer_max_training_examples(
+            training_args, config, dump_dir=dump_dir
+        )
         if hs_max_train is not None:
             hf_df = hf_df.head(hs_max_train).reset_index(drop=True)
             logger.warning(
@@ -542,8 +555,29 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     # If we are in HF-only mode, HyperSteer concept space must match the trained low_rank_dimension.
     use_hf_only = (metadata is None)
     trained_hypersteer_dim = None
-    if "HyperSteer" in training_args.models:
-        trained_hypersteer_dim = training_args.models["HyperSteer"].low_rank_dimension or 1
+    try:
+        if hasattr(training_args, "models") and "HyperSteer" in training_args.models:
+            v = getattr(training_args.models["HyperSteer"], "low_rank_dimension", None)
+            if v is not None:
+                trained_hypersteer_dim = int(v)
+    except Exception:
+        trained_hypersteer_dim = None
+
+    # Fallback: read from saved train config.json if TrainingArgs dropped the field
+    if trained_hypersteer_dim is None and isinstance(config, dict):
+        try:
+            v = (
+                config.get("models", {}).get("HyperSteer", {}).get("low_rank_dimension", None)
+                or config.get("train", {}).get("models", {}).get("HyperSteer", {}).get("low_rank_dimension", None)
+            )
+            if v is not None:
+                trained_hypersteer_dim = int(v)
+        except Exception:
+            pass
+
+    # Final fallback: HF-only HyperSteer runs default to a single concept slot
+    if trained_hypersteer_dim is None and (metadata is None) and ("HyperSteer" in getattr(args, "models", [])):
+        trained_hypersteer_dim = 1
 
     if use_hf_only:
         # HyperSteer-only runs often have a single concept slot; map HF examples into concept_id=0.
@@ -710,15 +744,18 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     for concept_id in my_concept_ids:
         if use_hf_only:
             # Select HF rows matching the desired concept prompt, then map to concept_id=0.
-            concept_rows = hf_df[hf_df["output_concept"] == args.concept_prompt].head(
+            target_concept = str(args.concept_prompt).strip()
+            concept_rows = hf_df[
+                hf_df["output_concept"].astype(str).str.strip() == target_concept
+            ].head(
                 int(num_of_examples) if num_of_examples is not None else 0
             )
             if len(concept_rows) == 0:
                 logger.warning(
-                    f"[Warn] No HF rows found for output_concept='{args.concept_prompt}' "
+                    f"[Warn] No HF rows found for output_concept='{target_concept}' "
                     f"within the first {len(hf_df)} rows (training slice). Skipping."
                 )
-                continue
+                break
 
             factors = steering_factors if steering_factors is not None else [1.0]
 
@@ -729,7 +766,7 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                     records.append({
                         "input": row["input"],
                         "output": row["output"],
-                        "input_concept": args.concept_prompt,
+                        "input_concept": target_concept,
                         "concept_id": 0,
                         "factor": float(f),
                         "input_id": int(input_ctr),
