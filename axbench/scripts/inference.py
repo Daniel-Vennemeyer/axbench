@@ -207,6 +207,14 @@ def parse_gsm8k_pred(text):
 def infer_benchmark(args, rank, world_size, device, logger, training_args):
     assert args.benchmark == "gsm8k", "Only GSM8K supported for now"
 
+    # --- Sanity check: fail fast if use_steering is set but no steering is applied here ---
+    if getattr(args, "use_steering", False):
+        raise RuntimeError(
+            "Sanity check failed: use_steering=True in benchmark mode, "
+            "but infer_benchmark does not apply HyperSteer. "
+            "Use infer_steering or implement a steered benchmark path."
+        )
+
     dataset = load_dataset("gsm8k", "main", split="test")
 
     if getattr(args, "max_questions", None) is not None:
@@ -225,6 +233,12 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
         torch_dtype=torch.bfloat16 if getattr(args, "use_bf16", False) else None,
         device_map=device
     ).eval()
+
+    # --- Sanity check: log that this is a vanilla model ---
+    logger.warning(
+        f"[SanityCheck] Benchmark model class = {model.__class__.__name__}. "
+        "This should be a plain HF model (no HyperSteer hooks)."
+    )
 
     runner = BenchmarkRunner(
         model,
@@ -555,12 +569,21 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                 training_args=training_args.models[model_name],
                 lm_model_name=training_args.model_name,
             )
+            # --- Sanity: Add a flag to check if HyperSteer hook is called ---
+            benchmark_model._sanity_hook_called = False
             benchmark_model.load(
                 dump_dir=train_dir, low_rank_dimension=1, mode="steering", 
                 hypernet_initialize_from_pretrained=training_args.models[model_name].hypernet_initialize_from_pretrained,
                 hypernet_name_or_path=training_args.models[model_name].hypernet_name_or_path,
                 num_hidden_layers=training_args.models[model_name].num_hidden_layers,
             )
+            # --- After load, wrap the ax.forward to fire the sanity flag ---
+            if hasattr(benchmark_model, "ax"):
+                orig_forward = benchmark_model.ax.forward
+                def _wrapped_forward(*args, **kwargs):
+                    benchmark_model._sanity_hook_called = True
+                    return orig_forward(*args, **kwargs)
+                benchmark_model.ax.forward = _wrapped_forward
             preloaded_models[model_name] = benchmark_model
 
     # Now loop over concept_ids and use preloaded models
@@ -633,6 +656,15 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                 intervene_on_prompt=args.intervene_on_prompt if args.intervene_on_prompt is not None else True,
                 return_vector=False,
             )
+            # --- After prediction, check if HyperSteer hook fired and log ---
+            if model_name == "HyperSteer":
+                assert benchmark_model._sanity_hook_called, (
+                    "Sanity check failed: HyperSteer was loaded but its intervention "
+                    "hook never fired. Steering is not being applied."
+                )
+                logger.warning(
+                    "[SanityCheck] HyperSteer hook fired successfully — steering is active."
+                )
             # Store the results in current_df
             for k, v in results.items():
                 current_df[f"{model_name}_{k}"] = v
