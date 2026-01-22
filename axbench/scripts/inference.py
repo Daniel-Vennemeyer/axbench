@@ -51,15 +51,15 @@ BENCHMARK_PROMPTS = {
         "base": (
             "Question:\n{question}\n\n"
             "Please reason step by step.\n"
-            "End your response with:\n"
-            "#### <final numeric answer>\n\n"
+            "Finish with ONE line containing only the final integer answer in EXACTLY this format:\n"
+            "#### 123\n\n"
             "Answer:"
         ),
         "steering": (
             "Question:\n{question}\n\n"
             "Please reason step by step.\n"
-            "End your response with:\n"
-            "#### <final numeric answer>\n\n"
+            "Finish with ONE line containing only the final integer answer in EXACTLY this format:\n"
+            "#### 123\n\n"
             "Answer:"
         ),
         "concept": "Basic Arithmetic Reasoning",
@@ -278,7 +278,7 @@ class BenchmarkRunner:
                 truncation=True
             ).to(self.device)
 
-            # Custom stopping criteria for GSM8K: stop after '####'
+            # Custom stopping criteria for GSM8K: stop after '#### <int>'
             from transformers import StoppingCriteria, StoppingCriteriaList
             class GSM8KStop(StoppingCriteria):
                 def __init__(self, tokenizer, start_len):
@@ -289,7 +289,7 @@ class BenchmarkRunner:
                     # Only look at newly generated tokens
                     for seq in input_ids:
                         decoded = self.tokenizer.decode(seq[self.start_len:], skip_special_tokens=True)
-                        if "####" in decoded:
+                        if re.search(r"####\s*-?\d+", decoded):
                             return True
                     return False
 
@@ -299,29 +299,23 @@ class BenchmarkRunner:
                 outputs = self.model.generate(
                     **toks,
                     max_new_tokens=max_new_tokens,
-                    temperature=0.0,
+                    temperature=1.0,
                     do_sample=False,
                     eos_token_id=self.tokenizer.eos_token_id,
                     pad_token_id=self.tokenizer.eos_token_id,
                     stopping_criteria=stopping_criteria,
                 )
             decoded = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            # Post-process: Truncate after first '####' line (inclusive)
+            # Post-process: Truncate after first '#### <int>' (inclusive)
             processed = []
             for d in decoded:
-                idx = d.find("####")
-                if idx == -1:
-                    processed.append(d)
+                # Prefer to truncate right after the first occurrence of "#### <int>"
+                m = re.search(r"####\s*-?\d+", d)
+                if m:
+                    processed.append(d[: m.end()])
                 else:
-                    # Keep up to and including the line containing '####'
-                    after = d[idx:]
-                    # Find the end of the line after '####'
-                    # If after contains a newline, cut after that; else, to the end.
-                    nl = after.find("\n")
-                    if nl != -1:
-                        processed.append(d[:idx+nl])
-                    else:
-                        processed.append(d[:idx+len(after)])
+                    # Fallback: keep original if no final-answer pattern was produced
+                    processed.append(d)
             results.extend(processed)
         return results
 
@@ -343,17 +337,17 @@ def parse_gsm8k_gold(answer):
 
 def parse_gsm8k_pred(text):
     """
-    Hardened GSM8K prediction parser.
-    Returns the first integer found on a line beginning with '####', else None.
+    Parse the predicted GSM8K answer.
+    We require an explicit '#### <int>' marker (anywhere in the text).
     """
-    # Find the first line that matches ^####\s*(-?\d+)
-    for line in text.splitlines():
-        m = re.match(r"^####\s*(-?\d+)", line.strip())
-        if m:
-            try:
-                return int(m.group(1))
-            except Exception:
-                continue
+    # Normalize commas just in case (e.g., 2,125)
+    cleaned = text.replace(",", "")
+    m = re.search(r"####\s*(-?\d+)", cleaned)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
     return None
 
 
