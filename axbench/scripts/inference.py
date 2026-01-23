@@ -43,9 +43,9 @@ class GSM8KFinalAnswerProcessor(LogitsProcessor):
             for t in toks:
                 self.digit_tokens.add(t)
         # Also allow newline
-        self.allowed_after = set(self.digit_tokens)
-        for t in tokenizer.encode("\n", add_special_tokens=False):
-            self.allowed_after.add(t)
+        # self.allowed_after = set(self.digit_tokens)
+        # for t in tokenizer.encode("\n", add_special_tokens=False):
+        #     self.allowed_after.add(t)
         self.eos = tokenizer.eos_token_id
 
     def __call__(self, input_ids, scores):
@@ -308,7 +308,7 @@ class BenchmarkRunner:
         self.device = device
         self.batch_size = batch_size
 
-    def run_batches(self, prompts, max_new_tokens=256):
+    def run_batches(self, prompts, max_new_tokens=512):
         results = []
         for i in range(0, len(prompts), self.batch_size):
             batch = prompts[i:i+self.batch_size]
@@ -460,7 +460,7 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
 
     outputs = runner.run_batches(
         prompts,
-        max_new_tokens=int(getattr(args, "benchmark_output_length", 256))
+        max_new_tokens=int(getattr(args, "benchmark_output_length", 512))
     )
 
     correct = 0
@@ -594,7 +594,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
     # ---- Run steered generation via predict_steer ----
     # HyperSteer exposes predict_steer (used by infer_steering), not predict_generate.
     batch_size = int(getattr(args, "benchmark_batch_size", 8))
-    eval_output_length = int(getattr(args, "steering_output_length", 256) or 256)
+    eval_output_length = int(getattr(args, "steering_output_length", 512) or 512)
 
     # Build a minimal dataframe expected by predict_steer.
     # 'output' is not used for accuracy scoring; keep it as empty string.
