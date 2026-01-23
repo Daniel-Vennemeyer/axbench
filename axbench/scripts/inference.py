@@ -337,9 +337,7 @@ class BenchmarkRunner:
                 outputs = self.model.generate(
                     **toks,
                     max_new_tokens=max_new_tokens,
-                    temperature=1.3,
-                    top_p=0.95,
-                    do_sample=True,
+                    do_sample=False,
                     eos_token_id=self.tokenizer.eos_token_id,
                     pad_token_id=self.tokenizer.eos_token_id,
                     stopping_criteria=stopping_criteria,
@@ -367,20 +365,33 @@ def parse_gsm8k_gold(answer):
 
 def parse_gsm8k_pred(text):
     """
-    Parse the predicted GSM8K answer.
-    Tightened parsing:
-      a) Split text into lines.
-      b) Scan lines from bottom to top.
-      c) Return the first line that matches r"^\\s*-?\\d+\\s*$".
-      d) If none found, fall back to the last integer anywhere.
+    Parse the predicted GSM8K answer robustly.
+
+    Strategy:
+      1) Scan lines bottom-up and return the first line that is a *pure integer*.
+      2) Fallback: find the last standalone integer token in the text,
+         excluding:
+           - numbers adjacent to letters (e.g. mwm654)
+           - numbers that are part of decimals (e.g. 0.67)
     """
-    lines = text.replace(",", "").splitlines()
+    # Normalize commas
+    clean = text.replace(",", "")
+    lines = clean.splitlines()
+
+    # Primary: last non-empty line that is strictly an integer
     for line in reversed(lines):
-        if re.match(r"^\s*-?\d+\s*$", line):
-            return int(line.strip())
-    # Fallback: last integer anywhere
-    nums = re.findall(r"-?\d+", text.replace(",", ""))
-    return int(nums[-1]) if nums else None
+        s = line.strip()
+        if re.fullmatch(r"-?\d+", s):
+            return int(s)
+
+    # Fallback: standalone integers only
+    # - not preceded/followed by letters
+    # - not preceded/followed by a dot (to avoid decimals)
+    candidates = re.findall(
+        r"(?<![A-Za-z0-9\.])(-?\d+)(?![A-Za-z0-9\.])",
+        clean
+    )
+    return int(candidates[-1]) if candidates else None
 
 
 # --------------------- Benchmark Inference Function ---------------------
@@ -396,9 +407,6 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
             "Use infer_steering or implement a steered benchmark path."
         )
 
-    # Ensure higher default temperature unless explicitly set
-    if getattr(args, "temperature", None) is None:
-        args.temperature = 1.3
 
     dataset = load_dataset("gsm8k", "main", split="test")
 
