@@ -275,7 +275,8 @@ class BenchmarkRunner:
                 truncation=True
             ).to(self.device)
 
-            # Improved GSM8K stopping: stop when at least one integer has appeared and a newline or EOS follows
+            # GSM8K strict stopping: require (a) at least one integer after min_gen_tokens,
+            # AND (b) either EOS generated OR last non-empty line is integer-only.
             from transformers import StoppingCriteria, StoppingCriteriaList
             import torch
             import re
@@ -286,39 +287,42 @@ class BenchmarkRunner:
                     self.start_len = start_len
                     self.eos_token_id = eos_token_id
                     self.min_gen_tokens = min_gen_tokens
-                    self._seen_answer = []
+                    self._seen_integer = [False]  # will be set to batch size on first call
 
                 def __call__(self, input_ids, scores, **kwargs):
                     batch_size = input_ids.shape[0]
-                    if not self._seen_answer:
-                        self._seen_answer = [False] * batch_size
-
+                    if not isinstance(self._seen_integer, list) or len(self._seen_integer) != batch_size:
+                        self._seen_integer = [False] * batch_size
+                    stop_batch = [False] * batch_size
                     for i, seq in enumerate(input_ids):
                         gen_len = seq.shape[0] - self.start_len
                         if gen_len < self.min_gen_tokens:
                             continue
-
-                        decoded = self.tokenizer.decode(
-                            seq[self.start_len:], skip_special_tokens=True
-                        )
-
-                        matches = list(re.finditer(r"-?\d+", decoded))
-                        if not matches:
+                        # decode only the newly generated suffix
+                        generated_ids = seq[self.start_len:]
+                        decoded = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+                        # Check for at least one integer
+                        if not self._seen_integer[i]:
+                            if re.search(r"-?\d+", decoded):
+                                self._seen_integer[i] = True
+                        if not self._seen_integer[i]:
                             continue
-
-                        last = matches[-1]
-                        # Require the integer to be near the end of the generation
-                        if last.end() < len(decoded) - 8:
+                        # Check for EOS
+                        if seq[-1].item() == self.eos_token_id:
+                            stop_batch[i] = True
                             continue
-
-                        self._seen_answer[i] = True
-                        tail = decoded[last.start():]
-
-                        # Stop on EOS or a double newline after the final integer
-                        if "\n\n" in tail or seq[-1].item() == self.eos_token_id:
-                            return True
-
-                    return False
+                        # Check if last non-empty line is integer-only
+                        lines = decoded.splitlines()
+                        # Find the last non-empty line
+                        last_nonempty = None
+                        for line in reversed(lines):
+                            if line.strip() != "":
+                                last_nonempty = line
+                                break
+                        if last_nonempty is not None and re.match(r"^\s*-?\d+\s*$", last_nonempty):
+                            stop_batch[i] = True
+                    # Stop if any in the batch should stop
+                    return any(stop_batch)
 
             stopping_criteria = StoppingCriteriaList([
                 GSM8KStop(
@@ -333,7 +337,7 @@ class BenchmarkRunner:
                 outputs = self.model.generate(
                     **toks,
                     max_new_tokens=max_new_tokens,
-                    temperature=1.0,
+                    temperature=1.3,
                     do_sample=False,
                     eos_token_id=self.tokenizer.eos_token_id,
                     pad_token_id=self.tokenizer.eos_token_id,
@@ -363,8 +367,17 @@ def parse_gsm8k_gold(answer):
 def parse_gsm8k_pred(text):
     """
     Parse the predicted GSM8K answer.
-    Extracts the last integer anywhere in the output.
+    Tightened parsing:
+      a) Split text into lines.
+      b) Scan lines from bottom to top.
+      c) Return the first line that matches r"^\\s*-?\\d+\\s*$".
+      d) If none found, fall back to the last integer anywhere.
     """
+    lines = text.replace(",", "").splitlines()
+    for line in reversed(lines):
+        if re.match(r"^\s*-?\d+\s*$", line):
+            return int(line.strip())
+    # Fallback: last integer anywhere
     nums = re.findall(r"-?\d+", text.replace(",", ""))
     return int(nums[-1]) if nums else None
 
@@ -381,6 +394,10 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
             "but infer_benchmark does not apply HyperSteer. "
             "Use infer_steering or implement a steered benchmark path."
         )
+
+    # Ensure higher default temperature unless explicitly set
+    if getattr(args, "temperature", None) is None:
+        args.temperature = 1.3
 
     dataset = load_dataset("gsm8k", "main", split="test")
 
@@ -447,21 +464,9 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
 
     for ex, out in pbar:
         gold = parse_gsm8k_gold(ex["answer"])
-        # Clamp pathological generations: if response > 4x prompt, set pred=None
-        prompt = ex["question"]
-        # Use the actual prompt string used in generation
-        # Find corresponding prompt string
-        # Here, prompts list is in order, so index matches
         prompt_str = prompts[total]
-        response_truncated = False
-        pred = None
         resp = out
-        if len(resp) > 4 * len(prompt_str):
-            response_truncated = True
-            pred = None
-        else:
-            pred = parse_gsm8k_pred(resp)
-        # Treat None as incorrect answer
+        pred = parse_gsm8k_pred(resp)
         is_correct = (pred == gold) and (gold is not None) and (pred is not None)
         correct += int(is_correct)
         total += 1
@@ -471,7 +476,7 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
             "gold": gold,
             "pred": pred,
             "correct": is_correct,
-            "response_truncated": response_truncated,
+            "response": resp,
             "response_length": len(resp),
         })
 
@@ -588,7 +593,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
 
     # Ensure temperature is set and valid (Transformers requires temperature > 0)
     if getattr(args, "temperature", None) is None:
-        args.temperature = 1.0
+        args.temperature = 1.3
     results = benchmark_model.predict_steer(
         df,
         concept_id=0,
@@ -596,7 +601,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         sae_id=None,
         batch_size=batch_size,
         eval_output_length=eval_output_length,
-        temperature=float(getattr(args, "temperature", 1.0)) if float(getattr(args, "temperature", 1.0)) > 0 else 1.0,
+        temperature=float(getattr(args, "temperature", 1.3)) if float(getattr(args, "temperature", 1.3)) > 0 else 1.3,
         prefix_length=prefix_length,
         positions=hs_args.intervention_positions,
         use_synergy=False,
@@ -629,14 +634,8 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
     for idx, (ex, out) in enumerate(zip(dataset, outputs)):
         gold = parse_gsm8k_gold(ex["answer"])
         prompt_str = prompts[idx]
-        response_truncated = False
-        pred = None
         resp = out
-        if len(resp) > 4 * len(prompt_str):
-            response_truncated = True
-            pred = None
-        else:
-            pred = parse_gsm8k_pred(resp)
+        pred = parse_gsm8k_pred(resp)
         ok = (gold is not None) and (pred == gold)
         correct += int(ok)
         total += 1
@@ -645,8 +644,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
             "gold": gold,
             "pred": pred,
             "correct": ok,
-            "response": out,
-            "response_truncated": response_truncated,
+            "response": resp,
             "response_length": len(resp),
         })
 
