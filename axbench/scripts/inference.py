@@ -367,31 +367,109 @@ def parse_gsm8k_pred(text):
     """
     Parse the predicted GSM8K answer robustly.
 
-    Strategy:
-      1) Scan lines bottom-up and return the first line that is a *pure integer*.
-      2) Fallback: find the last standalone integer token in the text,
-         excluding:
-           - numbers adjacent to letters (e.g. mwm654)
-           - numbers that are part of decimals (e.g. 0.67)
+    Priority order:
+      1) If the model outputs a GSM8K-style marker, prefer the integer after '####'.
+      2) Scan lines bottom-up and return the first line that is a *pure integer*.
+      3) Fallback: return the last "answer-like" integer near the end of the text,
+         avoiding common pitfalls:
+           - decimals (e.g. 0.67 should not yield 67)
+           - digits glued to letters (e.g. mwm654)
+           - intermediate fractions (e.g. 3/60)
+         while allowing trailing punctuation like '$460.'.
     """
-    # Normalize commas
-    clean = text.replace(",", "")
-    lines = clean.splitlines()
+    if text is None:
+        return None
 
-    # Primary: last non-empty line that is strictly an integer
+    clean = text.replace(",", "")
+    # 1) GSM8K marker
+    if "####" in clean:
+        tail = clean.split("####")[-1]
+        m = re.search(r"-?\d+", tail)
+        if m:
+            try:
+                return int(m.group(0))
+            except Exception:
+                pass
+
+    # 2) Integer-only line (canonical)
+    lines = clean.splitlines()
     for line in reversed(lines):
         s = line.strip()
         if re.fullmatch(r"-?\d+", s):
             return int(s)
 
-    # Fallback: standalone integers only
-    # - not preceded/followed by letters
-    # - not preceded/followed by a dot (to avoid decimals)
-    candidates = re.findall(
-        r"(?<![A-Za-z0-9\.])(-?\d+)(?![A-Za-z0-9\.])",
-        clean
-    )
-    return int(candidates[-1]) if candidates else None
+    # 3) Fallback: scan integer tokens with context-aware filtering
+    # Token pattern: optional sign + digits, bounded so it's not glued to letters/digits.
+    # Allow trailing punctuation (.,;:!?) and currency symbols around it.
+    token_iter = list(re.finditer(r"(?<![A-Za-z0-9])(-?\d+)(?![A-Za-z0-9])", clean))
+    if not token_iter:
+        return None
+
+    def _is_decimal_like(s, start, end):
+        # Exclude if part of a decimal like 0.67 or 3.0
+        # If immediately preceded by '.' OR immediately followed by '.' + digit => decimal component.
+        if start - 1 >= 0 and s[start - 1] == ".":
+            return True
+        if end < len(s) and s[end] == "." and (end + 1) < len(s) and s[end + 1].isdigit():
+            return True
+        return False
+
+    def _is_glued_to_letter(s, start, end):
+        # Exclude if adjacent to letters (e.g., mwm654 or 654abc)
+        if start - 1 >= 0 and s[start - 1].isalpha():
+            return True
+        if end < len(s) and s[end].isalpha():
+            return True
+        return False
+
+    def _is_fraction_denominator(s, start, end):
+        # Exclude if immediately preceded by '/' (denominator) or immediately followed by '/' (numerator)
+        if start - 1 >= 0 and s[start - 1] == "/":
+            return True
+        if end < len(s) and s[end] == "/":
+            return True
+        return False
+
+    # Prefer integers that appear late and are "answer-like":
+    # - near 'final', 'answer', or after '='
+    # We'll scan from the end and take the first token that passes filters,
+    # with a mild preference for answer-ish local context.
+    answerish_words = ("final", "answer", "therefore", "thus", "so", "=", "####")
+    for m in reversed(token_iter):
+        start, end = m.start(1), m.end(1)
+        if _is_decimal_like(clean, start, end):
+            continue
+        if _is_glued_to_letter(clean, start, end):
+            continue
+        if _is_fraction_denominator(clean, start, end):
+            continue
+
+        # Check local context window
+        left = max(0, start - 24)
+        right = min(len(clean), end + 24)
+        ctx = clean[left:right].lower()
+        # If it's very late in the string, accept; otherwise require a small hint
+        if end >= len(clean) - 128 or any(w in ctx for w in answerish_words):
+            try:
+                return int(m.group(1))
+            except Exception:
+                continue
+
+    # Final fallback: last token that passes filters (even if not near end/keywords)
+    for m in reversed(token_iter):
+        start, end = m.start(1), m.end(1)
+        if _is_decimal_like(clean, start, end):
+            continue
+        if _is_glued_to_letter(clean, start, end):
+            continue
+        if _is_fraction_denominator(clean, start, end):
+            continue
+        try:
+            return int(m.group(1))
+        except Exception:
+            continue
+
+    return None
 
 
 # --------------------- Benchmark Inference Function ---------------------
