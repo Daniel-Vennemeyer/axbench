@@ -23,6 +23,47 @@ from axbench.scripts.args.dataset_args import DatasetArgs
 from axbench.scripts.args.training_args import TrainingArgs
 from transformers import set_seed
 
+# ---- GSM8K Final Answer Logits Masking ----
+from transformers import LogitsProcessor, LogitsProcessorList
+import torch
+
+class GSM8KFinalAnswerProcessor(LogitsProcessor):
+    """
+    Once the model emits '####', restrict subsequent tokens to digits, newline, or EOS.
+    This enforces a single-line final answer of the form: '#### <int>'.
+    """
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        # Token sequence for '####'
+        self.hash_tokens = tokenizer.encode("####", add_special_tokens=False)
+        # Allow digits after delimiter
+        self.digit_tokens = set()
+        for d in "0123456789":
+            toks = tokenizer.encode(d, add_special_tokens=False)
+            for t in toks:
+                self.digit_tokens.add(t)
+        # Also allow newline
+        self.allowed_after = set(self.digit_tokens)
+        for t in tokenizer.encode("\n", add_special_tokens=False):
+            self.allowed_after.add(t)
+        self.eos = tokenizer.eos_token_id
+
+    def __call__(self, input_ids, scores):
+        # input_ids: (batch, seq_len)
+        for i in range(input_ids.size(0)):
+            seq = input_ids[i]
+            if len(seq) >= len(self.hash_tokens):
+                # Check if the most recent tokens exactly match '####'
+                if seq[-len(self.hash_tokens):].tolist() == self.hash_tokens:
+                    # Mask everything except digits, newline, and EOS
+                    mask = torch.full_like(scores[i], float("-inf"))
+                    for t in self.allowed_after:
+                        mask[t] = 0.0
+                    if self.eos is not None:
+                        mask[self.eos] = 0.0
+                    scores[i] = scores[i] + mask
+        return scores
+
 # all supported methods
 import axbench
 from openai import AsyncOpenAI
@@ -52,14 +93,14 @@ BENCHMARK_PROMPTS = {
             "Question:\n{question}\n\n"
             "Please reason step by step.\n"
             "Finish with ONE line containing only the final integer answer in EXACTLY this format:\n"
-            "#### 123\n\n"
+            "#### <Answer Integer>\n\n"
             "Answer:"
         ),
         "steering": (
             "Question:\n{question}\n\n"
             "Please reason step by step.\n"
             "Finish with ONE line containing only the final integer answer in EXACTLY this format:\n"
-            "#### 123\n\n"
+            "#### <Answer Integer>\n\n"
             "Answer:"
         ),
         "concept": "Basic Arithmetic Reasoning",
@@ -295,6 +336,11 @@ class BenchmarkRunner:
 
             stopping_criteria = StoppingCriteriaList([GSM8KStop(self.tokenizer, toks.input_ids.shape[1])])
 
+            # --- GSM8K logits masking: restrict after '####' to digits, newline, EOS ---
+            logits_processor = LogitsProcessorList([
+                GSM8KFinalAnswerProcessor(self.tokenizer)
+            ])
+
             with torch.no_grad():
                 outputs = self.model.generate(
                     **toks,
@@ -304,6 +350,7 @@ class BenchmarkRunner:
                     eos_token_id=self.tokenizer.eos_token_id,
                     pad_token_id=self.tokenizer.eos_token_id,
                     stopping_criteria=stopping_criteria,
+                    logits_processor=logits_processor,
                 )
             decoded = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
             # Post-process: Truncate after first '#### <int>' (inclusive)
