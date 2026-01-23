@@ -31,6 +31,7 @@ class GSM8KFinalAnswerProcessor(LogitsProcessor):
     """
     Once the model emits '####', restrict subsequent tokens to digits, newline, or EOS.
     This enforces a single-line final answer of the form: '#### <int>'.
+    After the first newline following the digits, only EOS is allowed.
     """
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
@@ -42,26 +43,84 @@ class GSM8KFinalAnswerProcessor(LogitsProcessor):
             toks = tokenizer.encode(d, add_special_tokens=False)
             for t in toks:
                 self.digit_tokens.add(t)
-        # Also allow newline
-        # self.allowed_after = set(self.digit_tokens)
-        # for t in tokenizer.encode("\n", add_special_tokens=False):
-        #     self.allowed_after.add(t)
+        # Newline tokens
+        self.newline_tokens = set(tokenizer.encode("\n", add_special_tokens=False))
+        # Allowed tokens after delimiter: digits + newline(s)
+        self.allowed_after = set(self.digit_tokens)
+        self.allowed_after.update(self.newline_tokens)
         self.eos = tokenizer.eos_token_id
+        # Internal state per sequence index
+        self._seen_hash = set()
+        self._seen_digit = set()
+        self._done = set()
 
     def __call__(self, input_ids, scores):
         # input_ids: (batch, seq_len)
-        for i in range(input_ids.size(0)):
+        batch_size = input_ids.size(0)
+        seq_len = input_ids.size(1)
+        for i in range(batch_size):
             seq = input_ids[i]
-            if len(seq) >= len(self.hash_tokens):
-                # Check if the most recent tokens exactly match '####'
+            # Check if the hash delimiter '####' just appeared at the end
+            if seq_len >= len(self.hash_tokens):
                 if seq[-len(self.hash_tokens):].tolist() == self.hash_tokens:
-                    # Mask everything except digits, newline, and EOS
-                    mask = torch.full_like(scores[i], float("-inf"))
-                    for t in self.allowed_after:
-                        mask[t] = 0.0
-                    if self.eos is not None:
-                        mask[self.eos] = 0.0
-                    scores[i] = scores[i] + mask
+                    # Just completed '####' for this sequence
+                    self._seen_hash.add(i)
+                    if i in self._seen_digit:
+                        self._seen_digit.remove(i)
+                    if i in self._done:
+                        self._done.remove(i)
+            # If we are in the post-'####' phase and not done
+            if i in self._seen_hash and i not in self._done:
+                last_token = seq[-1].item()
+                # If we have not yet seen a digit after '####'
+                if i not in self._seen_digit:
+                    if last_token in self.digit_tokens:
+                        self._seen_digit.add(i)
+                        # Allow digits, newline, EOS
+                        mask = torch.full_like(scores[i], float("-inf"))
+                        for t in self.digit_tokens:
+                            mask[t] = 0.0
+                        for t in self.newline_tokens:
+                            mask[t] = 0.0
+                        if self.eos is not None:
+                            mask[self.eos] = 0.0
+                        scores[i] = scores[i] + mask
+                        continue
+                    else:
+                        # Only allow digits (no free text, no newline) before any digit
+                        mask = torch.full_like(scores[i], float("-inf"))
+                        for t in self.digit_tokens:
+                            mask[t] = 0.0
+                        scores[i] = scores[i] + mask
+                        continue
+                # If we've seen at least one digit after '####'
+                if i in self._seen_digit:
+                    if last_token in self.newline_tokens:
+                        # After first newline following digits: only EOS is allowed
+                        mask = torch.full_like(scores[i], float("-inf"))
+                        if self.eos is not None:
+                            mask[self.eos] = 0.0
+                        scores[i] = scores[i] + mask
+                        self._done.add(i)
+                        continue
+                    else:
+                        # Still allow digits, newline, EOS
+                        mask = torch.full_like(scores[i], float("-inf"))
+                        for t in self.digit_tokens:
+                            mask[t] = 0.0
+                        for t in self.newline_tokens:
+                            mask[t] = 0.0
+                        if self.eos is not None:
+                            mask[self.eos] = 0.0
+                        scores[i] = scores[i] + mask
+                        continue
+            # If done, force only EOS
+            if i in self._done:
+                mask = torch.full_like(scores[i], float("-inf"))
+                if self.eos is not None:
+                    mask[self.eos] = 0.0
+                scores[i] = scores[i] + mask
+                continue
         return scores
 
 # all supported methods
@@ -308,7 +367,7 @@ class BenchmarkRunner:
         self.device = device
         self.batch_size = batch_size
 
-    def run_batches(self, prompts, max_new_tokens=512):
+    def run_batches(self, prompts, max_new_tokens=256):
         results = []
         for i in range(0, len(prompts), self.batch_size):
             batch = prompts[i:i+self.batch_size]
@@ -460,7 +519,7 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
 
     outputs = runner.run_batches(
         prompts,
-        max_new_tokens=int(getattr(args, "benchmark_output_length", 512))
+        max_new_tokens=int(getattr(args, "benchmark_output_length", 256))
     )
 
     correct = 0
@@ -594,7 +653,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
     # ---- Run steered generation via predict_steer ----
     # HyperSteer exposes predict_steer (used by infer_steering), not predict_generate.
     batch_size = int(getattr(args, "benchmark_batch_size", 8))
-    eval_output_length = int(getattr(args, "steering_output_length", 512) or 512)
+    eval_output_length = int(getattr(args, "steering_output_length", 256) or 256)
 
     # Build a minimal dataframe expected by predict_steer.
     # 'output' is not used for accuracy scoring; keep it as empty string.
