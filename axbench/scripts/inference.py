@@ -23,105 +23,6 @@ from axbench.scripts.args.dataset_args import DatasetArgs
 from axbench.scripts.args.training_args import TrainingArgs
 from transformers import set_seed
 
-# ---- GSM8K Final Answer Logits Masking ----
-from transformers import LogitsProcessor, LogitsProcessorList
-import torch
-
-class GSM8KFinalAnswerProcessor(LogitsProcessor):
-    """
-    Once the model emits '####', restrict subsequent tokens to digits, newline, or EOS.
-    This enforces a single-line final answer of the form: '#### <int>'.
-    After the first newline following the digits, only EOS is allowed.
-    """
-    def __init__(self, tokenizer):
-        self.tokenizer = tokenizer
-        # Token sequence for '####'
-        self.hash_tokens = tokenizer.encode("####", add_special_tokens=False)
-        # Allow digits after delimiter
-        self.digit_tokens = set()
-        for d in "0123456789":
-            toks = tokenizer.encode(d, add_special_tokens=False)
-            for t in toks:
-                self.digit_tokens.add(t)
-        # Newline tokens
-        self.newline_tokens = set(tokenizer.encode("\n", add_special_tokens=False))
-        # Allowed tokens after delimiter: digits + newline(s)
-        self.allowed_after = set(self.digit_tokens)
-        self.allowed_after.update(self.newline_tokens)
-        self.eos = tokenizer.eos_token_id
-        # Internal state per sequence index
-        self._seen_hash = set()
-        self._seen_digit = set()
-        self._done = set()
-
-    def __call__(self, input_ids, scores):
-        # input_ids: (batch, seq_len)
-        batch_size = input_ids.size(0)
-        seq_len = input_ids.size(1)
-        for i in range(batch_size):
-            seq = input_ids[i]
-            # Check if the hash delimiter '####' just appeared at the end
-            if seq_len >= len(self.hash_tokens):
-                if seq[-len(self.hash_tokens):].tolist() == self.hash_tokens:
-                    # Just completed '####' for this sequence
-                    self._seen_hash.add(i)
-                    if i in self._seen_digit:
-                        self._seen_digit.remove(i)
-                    if i in self._done:
-                        self._done.remove(i)
-            # If we are in the post-'####' phase and not done
-            if i in self._seen_hash and i not in self._done:
-                last_token = seq[-1].item()
-                # If we have not yet seen a digit after '####'
-                if i not in self._seen_digit:
-                    if last_token in self.digit_tokens:
-                        self._seen_digit.add(i)
-                        # Allow digits, newline, EOS
-                        mask = torch.full_like(scores[i], float("-inf"))
-                        for t in self.digit_tokens:
-                            mask[t] = 0.0
-                        for t in self.newline_tokens:
-                            mask[t] = 0.0
-                        if self.eos is not None:
-                            mask[self.eos] = 0.0
-                        scores[i] = scores[i] + mask
-                        continue
-                    else:
-                        # Only allow digits (no free text, no newline) before any digit
-                        mask = torch.full_like(scores[i], float("-inf"))
-                        for t in self.digit_tokens:
-                            mask[t] = 0.0
-                        scores[i] = scores[i] + mask
-                        continue
-                # If we've seen at least one digit after '####'
-                if i in self._seen_digit:
-                    if last_token in self.newline_tokens:
-                        # After first newline following digits: only EOS is allowed
-                        mask = torch.full_like(scores[i], float("-inf"))
-                        if self.eos is not None:
-                            mask[self.eos] = 0.0
-                        scores[i] = scores[i] + mask
-                        self._done.add(i)
-                        continue
-                    else:
-                        # Still allow digits, newline, EOS
-                        mask = torch.full_like(scores[i], float("-inf"))
-                        for t in self.digit_tokens:
-                            mask[t] = 0.0
-                        for t in self.newline_tokens:
-                            mask[t] = 0.0
-                        if self.eos is not None:
-                            mask[self.eos] = 0.0
-                        scores[i] = scores[i] + mask
-                        continue
-            # If done, force only EOS
-            if i in self._done:
-                mask = torch.full_like(scores[i], float("-inf"))
-                if self.eos is not None:
-                    mask[self.eos] = 0.0
-                scores[i] = scores[i] + mask
-                continue
-        return scores
 
 # all supported methods
 import axbench
@@ -150,16 +51,12 @@ BENCHMARK_PROMPTS = {
     "gsm8k": {
         "base": (
             "Question:\n{question}\n\n"
-            "Please reason step by step.\n"
-            "Finish with ONE line containing only the final integer answer in EXACTLY this format:\n"
-            "#### <Answer Integer>\n\n"
+            "Please reason step by step and clearly state the final integer answer.\n\n"
             "Answer:"
         ),
         "steering": (
             "Question:\n{question}\n\n"
-            "Please reason step by step.\n"
-            "Finish with ONE line containing only the final integer answer in EXACTLY this format:\n"
-            "#### <Answer Integer>\n\n"
+            "Please reason step by step and clearly state the final integer answer.\n\n"
             "Answer:"
         ),
         "concept": "Basic Arithmetic Reasoning",
@@ -378,27 +275,33 @@ class BenchmarkRunner:
                 truncation=True
             ).to(self.device)
 
-            # Custom stopping criteria for GSM8K: stop after '#### <int>'
+            # Improved GSM8K stopping: stop when at least one integer has appeared and a newline or EOS follows
             from transformers import StoppingCriteria, StoppingCriteriaList
+            import torch
             class GSM8KStop(StoppingCriteria):
-                def __init__(self, tokenizer, start_len):
+                def __init__(self, tokenizer, start_len, eos_token_id):
                     super().__init__()
                     self.tokenizer = tokenizer
                     self.start_len = start_len
+                    self.eos_token_id = eos_token_id
+                    self._seen_digit = [False] * toks.input_ids.shape[0]
                 def __call__(self, input_ids, scores, **kwargs):
-                    # Only look at newly generated tokens
-                    for seq in input_ids:
+                    # input_ids: (batch, seq_len)
+                    for idx, seq in enumerate(input_ids):
                         decoded = self.tokenizer.decode(seq[self.start_len:], skip_special_tokens=True)
-                        if re.search(r"####\s*-?\d+", decoded):
-                            return True
+                        has_int = re.search(r"-?\d+", decoded)
+                        if has_int:
+                            self._seen_digit[idx] = True
+                        if self._seen_digit[idx]:
+                            # Stop if ends with newline or EOS just emitted
+                            if decoded.rstrip().endswith("\n"):
+                                return True
+                            # If EOS token just emitted
+                            if seq[-1].item() == self.eos_token_id:
+                                return True
                     return False
 
-            stopping_criteria = StoppingCriteriaList([GSM8KStop(self.tokenizer, toks.input_ids.shape[1])])
-
-            # --- GSM8K logits masking: restrict after '####' to digits, newline, EOS ---
-            logits_processor = LogitsProcessorList([
-                GSM8KFinalAnswerProcessor(self.tokenizer)
-            ])
+            stopping_criteria = StoppingCriteriaList([GSM8KStop(self.tokenizer, toks.input_ids.shape[1], self.tokenizer.eos_token_id)])
 
             with torch.no_grad():
                 outputs = self.model.generate(
@@ -409,20 +312,10 @@ class BenchmarkRunner:
                     eos_token_id=self.tokenizer.eos_token_id,
                     pad_token_id=self.tokenizer.eos_token_id,
                     stopping_criteria=stopping_criteria,
-                    logits_processor=logits_processor,
                 )
             decoded = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            # Post-process: Truncate after first '#### <int>' (inclusive)
-            processed = []
-            for d in decoded:
-                # Prefer to truncate right after the first occurrence of "#### <int>"
-                m = re.search(r"####\s*-?\d+", d)
-                if m:
-                    processed.append(d[: m.end()])
-                else:
-                    # Fallback: keep original if no final-answer pattern was produced
-                    processed.append(d)
-            results.extend(processed)
+            # No post-generation truncation; return raw decoded outputs
+            results.extend(decoded)
         return results
 
 
@@ -444,17 +337,10 @@ def parse_gsm8k_gold(answer):
 def parse_gsm8k_pred(text):
     """
     Parse the predicted GSM8K answer.
-    We require an explicit '#### <int>' marker (anywhere in the text).
+    Extracts the last integer anywhere in the output.
     """
-    # Normalize commas just in case (e.g., 2,125)
-    cleaned = text.replace(",", "")
-    m = re.search(r"####\s*(-?\d+)", cleaned)
-    if m:
-        try:
-            return int(m.group(1))
-        except Exception:
-            return None
-    return None
+    nums = re.findall(r"-?\d+", text.replace(",", ""))
+    return int(nums[-1]) if nums else None
 
 
 # --------------------- Benchmark Inference Function ---------------------
