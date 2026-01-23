@@ -278,30 +278,56 @@ class BenchmarkRunner:
             # Improved GSM8K stopping: stop when at least one integer has appeared and a newline or EOS follows
             from transformers import StoppingCriteria, StoppingCriteriaList
             import torch
+            import re
             class GSM8KStop(StoppingCriteria):
-                def __init__(self, tokenizer, start_len, eos_token_id):
+                def __init__(self, tokenizer, start_len, eos_token_id, min_gen_tokens=32):
                     super().__init__()
                     self.tokenizer = tokenizer
                     self.start_len = start_len
                     self.eos_token_id = eos_token_id
-                    self._seen_digit = [False] * toks.input_ids.shape[0]
+                    self.min_gen_tokens = min_gen_tokens
+                    self._seen_answer = []
+
                 def __call__(self, input_ids, scores, **kwargs):
-                    # input_ids: (batch, seq_len)
-                    for idx, seq in enumerate(input_ids):
-                        decoded = self.tokenizer.decode(seq[self.start_len:], skip_special_tokens=True)
-                        has_int = re.search(r"-?\d+", decoded)
-                        if has_int:
-                            self._seen_digit[idx] = True
-                        if self._seen_digit[idx]:
-                            # Stop if ends with newline or EOS just emitted
-                            if decoded.rstrip().endswith("\n"):
-                                return True
-                            # If EOS token just emitted
-                            if seq[-1].item() == self.eos_token_id:
-                                return True
+                    batch_size = input_ids.shape[0]
+                    if not self._seen_answer:
+                        self._seen_answer = [False] * batch_size
+
+                    for i, seq in enumerate(input_ids):
+                        gen_len = seq.shape[0] - self.start_len
+                        if gen_len < self.min_gen_tokens:
+                            continue
+
+                        decoded = self.tokenizer.decode(
+                            seq[self.start_len:], skip_special_tokens=True
+                        )
+
+                        matches = list(re.finditer(r"-?\d+", decoded))
+                        if not matches:
+                            continue
+
+                        last = matches[-1]
+                        # Require the integer to be near the end of the generation
+                        if last.end() < len(decoded) - 8:
+                            continue
+
+                        self._seen_answer[i] = True
+                        tail = decoded[last.start():]
+
+                        # Stop on EOS or a double newline after the final integer
+                        if "\n\n" in tail or seq[-1].item() == self.eos_token_id:
+                            return True
+
                     return False
 
-            stopping_criteria = StoppingCriteriaList([GSM8KStop(self.tokenizer, toks.input_ids.shape[1], self.tokenizer.eos_token_id)])
+            stopping_criteria = StoppingCriteriaList([
+                GSM8KStop(
+                    self.tokenizer,
+                    toks.input_ids.shape[1],
+                    self.tokenizer.eos_token_id,
+                    min_gen_tokens=32,
+                )
+            ])
 
             with torch.no_grad():
                 outputs = self.model.generate(
