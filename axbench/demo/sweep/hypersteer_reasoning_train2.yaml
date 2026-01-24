@@ -11,7 +11,7 @@ train:
       batch_size: 12
       max_training_examples: 16000
       gradient_accumulation_steps: 1
-      n_epochs: 30
+      n_epochs: 50
       lr: 0.00008
       weight_decay: 0.00
       low_rank_dimension: 1
