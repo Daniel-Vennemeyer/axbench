@@ -51,13 +51,13 @@ BENCHMARK_PROMPTS = {
     "gsm8k": {
         "base": (
             "Question:\n{question}\n\n"
-            "Please reason step by step and clearly state the final integer answer.\n\n"
-            "Answer:"
+            "Please reason step by step. When you are done, give the final answer in one short sentence.\n\n"
+            "Therefore, the answer is:"
         ),
         "steering": (
             "Question:\n{question}\n\n"
-            "Please reason step by step and clearly state the final integer answer.\n\n"
-            "Answer:"
+            "Please reason step by step. When you are done, give the final answer in one short sentence.\n\n"
+            "Therefore, the answer is:"
         ),
         "concept": "Basic Arithmetic Reasoning",
     },
@@ -275,61 +275,61 @@ class BenchmarkRunner:
                 truncation=True
             ).to(self.device)
 
-            # GSM8K strict stopping: require (a) at least one integer after min_gen_tokens,
-            # AND (b) either EOS generated OR last non-empty line is integer-only.
+            # GSM8K natural stopping: encourage natural stopping by detecting answer cues and integer answers.
             from transformers import StoppingCriteria, StoppingCriteriaList
             import torch
             import re
-            class GSM8KStop(StoppingCriteria):
-                def __init__(self, tokenizer, start_len, eos_token_id, min_gen_tokens=32):
+            class NaturalGSM8KStop(StoppingCriteria):
+                def __init__(self, tokenizer, start_len, eos_token_id, prompt_lens, min_gen_tokens_floor=32):
                     super().__init__()
                     self.tokenizer = tokenizer
                     self.start_len = start_len
                     self.eos_token_id = eos_token_id
-                    self.min_gen_tokens = min_gen_tokens
-                    self._seen_integer = [False]  # will be set to batch size on first call
+                    self.prompt_lens = prompt_lens
+                    self.min_gen_tokens_floor = min_gen_tokens_floor
+                    self.answer_cue_re = re.compile(
+                        r"(therefore|final answer|answer is|the answer is|so the answer is)[^\d\-]*[\$\(]?\s*(-?\d[\d,]*)",
+                        re.IGNORECASE
+                    )
+                    self.int_line_re = re.compile(r"^\s*-?\d[\d,]*\s*$")
 
                 def __call__(self, input_ids, scores, **kwargs):
                     batch_size = input_ids.shape[0]
-                    if not isinstance(self._seen_integer, list) or len(self._seen_integer) != batch_size:
-                        self._seen_integer = [False] * batch_size
                     stop_batch = [False] * batch_size
                     for i, seq in enumerate(input_ids):
                         gen_len = seq.shape[0] - self.start_len
-                        if gen_len < self.min_gen_tokens:
+                        min_gen_tokens = max(self.min_gen_tokens_floor, int(0.75 * self.prompt_lens[i]))
+                        if gen_len < min_gen_tokens:
                             continue
                         # decode only the newly generated suffix
                         generated_ids = seq[self.start_len:]
                         decoded = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-                        # Check for at least one integer
-                        if not self._seen_integer[i]:
-                            if re.search(r"-?\d+", decoded):
-                                self._seen_integer[i] = True
-                        if not self._seen_integer[i]:
-                            continue
-                        # Check for EOS
+                        # 1. Stop if EOS token generated
                         if seq[-1].item() == self.eos_token_id:
                             stop_batch[i] = True
                             continue
-                        # Check if last non-empty line is integer-only
+                        # 2. Stop if answer cue followed by integer (optional $/comma/paren) found and min_gen_tokens reached
+                        m = self.answer_cue_re.search(decoded)
+                        if m:
+                            stop_batch[i] = True
+                            continue
+                        # 3. Fallback: stop if decoded suffix ends with integer-only line (after min gen tokens)
                         lines = decoded.splitlines()
-                        # Find the last non-empty line
-                        last_nonempty = None
                         for line in reversed(lines):
                             if line.strip() != "":
-                                last_nonempty = line
+                                if self.int_line_re.match(line):
+                                    stop_batch[i] = True
                                 break
-                        if last_nonempty is not None and re.match(r"^\s*-?\d+\s*$", last_nonempty):
-                            stop_batch[i] = True
-                    # Stop if any in the batch should stop
                     return any(stop_batch)
 
+            # Pre-compute per-example prompt lengths
+            prompt_lens = toks["attention_mask"].sum(dim=1).tolist()
             stopping_criteria = StoppingCriteriaList([
-                GSM8KStop(
+                NaturalGSM8KStop(
                     self.tokenizer,
                     toks.input_ids.shape[1],
                     self.tokenizer.eos_token_id,
-                    min_gen_tokens=32,
+                    prompt_lens=prompt_lens,
                 )
             ])
 
@@ -337,7 +337,18 @@ class BenchmarkRunner:
                 outputs = self.model.generate(
                     **toks,
                     max_new_tokens=max_new_tokens,
-                    do_sample=False,
+                    do_sample=(
+                        "gemma-2-2b" in getattr(self.model.config, "name_or_path", "").lower()
+                    ),
+                    temperature=(
+                        0.7 if "gemma-2-2b" in getattr(self.model.config, "name_or_path", "").lower() else 1.0
+                    ),
+                    top_p=(
+                        0.95 if "gemma-2-2b" in getattr(self.model.config, "name_or_path", "").lower() else 1.0
+                    ),
+                    repetition_penalty=(
+                        1.05 if "gemma-2-2b" in getattr(self.model.config, "name_or_path", "").lower() else 1.0
+                    ),
                     eos_token_id=self.tokenizer.eos_token_id,
                     pad_token_id=self.tokenizer.eos_token_id,
                     stopping_criteria=stopping_criteria,
@@ -369,8 +380,9 @@ def parse_gsm8k_pred(text):
 
     Priority order:
       1) If the model outputs a GSM8K-style marker, prefer the integer after '####'.
-      2) Scan lines bottom-up and return the first line that is a *pure integer*.
-      3) Fallback: return the last "answer-like" integer near the end of the text,
+      2) If the text contains an '=', take the substring after the last '=' and extract the first integer (allow $/paren/comma/punct).
+      3) Scan lines bottom-up and return the first line that is a *pure integer*.
+      4) Fallback: return the last "answer-like" integer near the end of the text,
          avoiding common pitfalls:
            - decimals (e.g. 0.67 should not yield 67)
            - digits glued to letters (e.g. mwm654)
@@ -391,14 +403,28 @@ def parse_gsm8k_pred(text):
             except Exception:
                 pass
 
-    # 2) Integer-only line (canonical)
+    # 2) Highest-priority: after last '=' extract first integer (allow $/paren/commas/trailing punct)
+    if "=" in clean:
+        tail = clean.split("=")[-1]
+        # Remove leading/trailing whitespace and possible currency/paren
+        tail = tail.strip()
+        # Look for $ or ( or whitespace, then integer, possibly with trailing . or )
+        # e.g. = $460. or = (460)
+        m = re.search(r"[\$\(\s]*(-?\d+)", tail)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                pass
+
+    # 3) Integer-only line (canonical)
     lines = clean.splitlines()
     for line in reversed(lines):
         s = line.strip()
         if re.fullmatch(r"-?\d+", s):
             return int(s)
 
-    # 3) Fallback: scan integer tokens with context-aware filtering
+    # 4) Fallback: scan integer tokens with context-aware filtering
     # Token pattern: optional sign + digits, bounded so it's not glued to letters/digits.
     # Allow trailing punctuation (.,;:!?) and currency symbols around it.
     token_iter = list(re.finditer(r"(?<![A-Za-z0-9])(-?\d+)(?![A-Za-z0-9])", clean))
@@ -678,9 +704,15 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
     except Exception:
         pass
 
-    # Ensure temperature is set and valid (Transformers requires temperature > 0)
-    if getattr(args, "temperature", None) is None:
-        args.temperature = 1.3
+    # Gemma-2-2B benefits from mild sampling for GSM8K-style reasoning
+    if "gemma-2-2b" in args.model_name.lower():
+        args.temperature = 0.7
+        args.top_p = 0.95
+        args.do_sample = True
+    else:
+        args.temperature = 1.0
+        args.top_p = 1.0
+        args.do_sample = False
     results = benchmark_model.predict_steer(
         df,
         concept_id=0,
@@ -688,7 +720,9 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         sae_id=None,
         batch_size=batch_size,
         eval_output_length=eval_output_length,
-        temperature=float(getattr(args, "temperature", 1.3)) if float(getattr(args, "temperature", 1.3)) > 0 else 1.3,
+        temperature=float(getattr(args, "temperature", 1.0)),
+        top_p=float(getattr(args, "top_p", 1.0)),
+        do_sample=bool(getattr(args, "do_sample", False)),
         prefix_length=prefix_length,
         positions=hs_args.intervention_positions,
         use_synergy=False,
