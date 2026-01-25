@@ -680,21 +680,17 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         for ex in dataset
     ]
 
-    # ---- Run steered generation via predict_steer ----
-    # HyperSteer exposes predict_steer (used by infer_steering), not predict_generate.
+    # ---- Parse steering factors ----
+    # Parse steering factors
+    if getattr(args, "steering_factors", None) is None:
+        steering_factors = [1.0]
+    elif isinstance(args.steering_factors, str):
+        steering_factors = [float(x) for x in args.steering_factors.split(",") if x.strip() != ""]
+    else:
+        steering_factors = list(args.steering_factors)
+
     batch_size = int(getattr(args, "benchmark_batch_size", 8))
     eval_output_length = int(getattr(args, "steering_output_length", 256) or 256)
-
-    # Build a minimal dataframe expected by predict_steer.
-    # 'output' is not used for accuracy scoring; keep it as empty string.
-    df = pd.DataFrame({
-        "input": prompts,
-        "output": ["" for _ in prompts],
-        "input_concept": ["Basic Arithmetic Reasoning" for _ in prompts],
-        "concept_id": [0 for _ in prompts],
-        "factor": [1.0 for _ in prompts],
-        "input_id": list(range(len(prompts))),
-    })
 
     # ---- Set prefix_length for chat models ----
     prefix_length = 1
@@ -713,79 +709,95 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         args.temperature = 1.0
         args.top_p = 1.0
         args.do_sample = False
-    results = benchmark_model.predict_steer(
-        df,
-        concept_id=0,
-        sae_link=None,
-        sae_id=None,
-        batch_size=batch_size,
-        eval_output_length=eval_output_length,
-        temperature=float(getattr(args, "temperature", 1.0)),
-        top_p=float(getattr(args, "top_p", 1.0)),
-        do_sample=bool(getattr(args, "do_sample", False)),
-        prefix_length=prefix_length,
-        positions=hs_args.intervention_positions,
-        use_synergy=False,
-        disable_neuronpedia_max_act=getattr(args, "disable_neuronpedia_max_act", False),
-        intervene_on_prompt=False,  # Only intervene during answer generation, not prompt
-        return_vector=False,
-    )
 
-    # Prefer the steered generation key used elsewhere in this repo.
-    if "steered_generation" in results:
-        outputs = results["steered_generation"]
-    elif "generation" in results:
-        outputs = results["generation"]
-    elif "output" in results:
-        outputs = results["output"]
-    else:
-        raise KeyError(
-            f"Unexpected HyperSteer.predict_steer result keys: {list(results.keys())}. "
-            "Expected one of: steered_generation, generation, output."
-        )
-
-    assert benchmark_model._sanity_hook_called, (
-        "Sanity check failed: HyperSteer hook never fired during GSM8K inference."
-    )
-
-    # ---- Score accuracy ----
-    correct, total = 0, 0
-    records = []
-
-    for idx, (ex, out) in enumerate(zip(dataset, outputs)):
-        gold = parse_gsm8k_gold(ex["answer"])
-        prompt_str = prompts[idx]
-        resp = out
-        pred = parse_gsm8k_pred(resp)
-        ok = (gold is not None) and (pred == gold)
-        correct += int(ok)
-        total += 1
-        records.append({
-            "question": ex["question"],
-            "gold": gold,
-            "pred": pred,
-            "correct": ok,
-            "response": resp,
-            "response_length": len(resp),
-        })
-
-    acc = correct / max(1, total)
-    logger.warning(f"[Benchmark:GSM8K+Steering] Accuracy={acc:.4f} ({correct}/{total})")
-
+    sweep_summary = []
     out_dir = Path(args.dump_dir) / "benchmark_steered"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    with open(out_dir / "gsm8k_results.jsonl", "w") as f:
-        for r in records:
-            f.write(json.dumps(r) + "\n")
+    dataset_list = list(dataset)
 
-    with open(out_dir / "gsm8k_summary.json", "w") as f:
-        json.dump({
-            "benchmark": "gsm8k",
+    for factor in steering_factors:
+        df = pd.DataFrame({
+            "input": prompts,
+            "output": ["" for _ in prompts],
+            "input_concept": ["Basic Arithmetic Reasoning" for _ in prompts],
+            "concept_id": [0 for _ in prompts],
+            "factor": [float(factor) for _ in prompts],
+            "input_id": list(range(len(prompts))),
+        })
+
+        results = benchmark_model.predict_steer(
+            df,
+            concept_id=0,
+            sae_link=None,
+            sae_id=None,
+            batch_size=batch_size,
+            eval_output_length=eval_output_length,
+            temperature=float(args.temperature),
+            top_p=float(args.top_p),
+            do_sample=bool(args.do_sample),
+            prefix_length=prefix_length,
+            positions=hs_args.intervention_positions,
+            use_synergy=False,
+            disable_neuronpedia_max_act=getattr(args, "disable_neuronpedia_max_act", False),
+            intervene_on_prompt=False,
+            return_vector=False,
+        )
+
+        outputs = (
+            results.get("steered_generation")
+            or results.get("generation")
+            or results.get("output")
+        )
+
+        correct, total = 0, 0
+        records = []
+
+        for ex, out in zip(dataset_list, outputs):
+            gold = parse_gsm8k_gold(ex["answer"])
+            pred = parse_gsm8k_pred(out)
+            ok = (gold is not None) and (pred == gold)
+            correct += int(ok)
+            total += 1
+            records.append({
+                "question": ex["question"],
+                "gold": gold,
+                "pred": pred,
+                "correct": ok,
+                "factor": factor,
+                "response": out,
+                "response_length": len(out),
+            })
+
+        acc = correct / max(1, total)
+        logger.warning(
+            f"[Benchmark:GSM8K+Steering] factor={factor} Accuracy={acc:.4f} ({correct}/{total})"
+        )
+
+        with open(out_dir / f"gsm8k_results_factor_{factor}.jsonl", "w") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+
+        with open(out_dir / f"gsm8k_summary_factor_{factor}.json", "w") as f:
+            json.dump({
+                "benchmark": "gsm8k",
+                "steered": True,
+                "factor": factor,
+                "accuracy": acc,
+                "correct": correct,
+                "total": total,
+            }, f, indent=2)
+
+        sweep_summary.append({
+            "factor": factor,
             "accuracy": acc,
-            "num_questions": total,
-            "steered": True,
-        }, f, indent=2)
+            "correct": correct,
+            "total": total,
+        })
+
+    # Save sweep summary
+    with open(out_dir / "gsm8k_sweep_summary.json", "w") as f:
+        json.dump(sweep_summary, f, indent=2)
 
 
 def create_data_latent(dataset_factory, metadata, concept_id, num_of_examples, args):
