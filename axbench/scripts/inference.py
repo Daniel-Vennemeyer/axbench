@@ -61,7 +61,43 @@ BENCHMARK_PROMPTS = {
         ),
         "concept": "Basic Arithmetic Reasoning",
     },
+    "supergpqa": {
+        "base": (
+            "Question:\n{question}\n\nOptions:\n{options}\n\n"
+            "Please reason step by step. When you are done, give the final answer as the correct option letter (A-J).\n\n"
+            "Therefore, the answer is:"
+        ),
+        "steering": (
+            "Question:\n{question}\n\nOptions:\n{options}\n\n"
+            "Please reason step by step. When you are done, give the final answer as the correct option letter (A-J).\n\n"
+            "Therefore, the answer is:"
+        ),
+        # concept intentionally omitted; handled by resolve_supergpqa_concept
+    },
 }
+
+# --- Helper: SuperGPQA Concept Prompt Resolution ---
+def resolve_supergpqa_concept(args, dataset_list):
+    """
+    Resolve the concept prompt for SuperGPQA.
+
+    Priority:
+      1) --concept_prompt (explicit override)
+      2) --supergpqa_auto_concept -> '<subfield> Reasoning'
+      3) Fallback: 'Medical Knowledge Reasoning'
+    """
+    if getattr(args, "concept_prompt", None):
+        return args.concept_prompt
+
+    if getattr(args, "supergpqa_auto_concept", False):
+        if not dataset_list:
+            raise ValueError("Cannot auto-derive concept: SuperGPQA dataset is empty.")
+        subfield = dataset_list[0].get("subfield")
+        if subfield is None:
+            raise ValueError("SuperGPQA example missing 'subfield'.")
+        return f"{subfield} Reasoning"
+
+    return "Medical Knowledge Reasoning"
 
 def load_config(config_path):
     """
@@ -374,6 +410,12 @@ def parse_gsm8k_gold(answer):
         return None
     return int(nums[-1])
 
+def parse_supergpqa_pred(text):
+    if text is None:
+        return None
+    m = re.search(r"\b([A-J])\b", text.strip(), re.IGNORECASE)
+    return m.group(1).upper() if m else None
+
 def parse_gsm8k_pred(text):
     """
     Parse the predicted GSM8K answer robustly.
@@ -501,8 +543,6 @@ def parse_gsm8k_pred(text):
 # --------------------- Benchmark Inference Function ---------------------
 
 def infer_benchmark(args, rank, world_size, device, logger, training_args):
-    assert args.benchmark == "gsm8k", "Only GSM8K supported for now"
-
     # --- Sanity check: fail fast if use_steering is set but no steering is applied here ---
     if getattr(args, "use_steering", False):
         raise RuntimeError(
@@ -511,16 +551,28 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
             "Use infer_steering or implement a steered benchmark path."
         )
 
-
-    dataset = load_dataset("gsm8k", "main", split="test")
-
-    if getattr(args, "max_questions", None) is not None:
-        dataset = dataset.select(range(min(len(dataset), args.max_questions)))
-
-    # shard dataset across ranks
-    dataset = dataset.shard(num_shards=world_size, index=rank)
-
-    dataset_list = list(dataset)
+    # Load dataset according to benchmark
+    if args.benchmark == "gsm8k":
+        dataset = load_dataset("gsm8k", "main", split="test")
+        if getattr(args, "max_questions", None) is not None:
+            dataset = dataset.select(range(min(len(dataset), args.max_questions)))
+        # shard dataset across ranks
+        dataset = dataset.shard(num_shards=world_size, index=rank)
+        dataset_list = list(dataset)
+    elif args.benchmark == "supergpqa":
+        dataset = load_dataset("m-a-p/SuperGPQA", split="test")
+        # Filter by discipline and field if specified
+        if getattr(args, "supergpqa_discipline", None) is not None:
+            dataset = dataset.filter(lambda ex: ex["discipline"] == args.supergpqa_discipline)
+        if getattr(args, "supergpqa_field", None) is not None:
+            dataset = dataset.filter(lambda ex: ex["field"] == args.supergpqa_field)
+        if getattr(args, "max_questions", None) is not None:
+            dataset = dataset.select(range(min(len(dataset), args.max_questions)))
+        # shard dataset across ranks
+        dataset = dataset.shard(num_shards=world_size, index=rank)
+        dataset_list = list(dataset)
+    else:
+        raise ValueError(f"Unsupported benchmark: {args.benchmark}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.padding_side = "left"
@@ -550,14 +602,23 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
         raise ValueError(f"No prompt configuration found for benchmark: {args.benchmark}")
 
     template = prompt_cfg["steering"] if getattr(args, "use_steering", False) else prompt_cfg["base"]
-    prompts = [
-        template.format(question=ex["question"])
-        for ex in dataset_list
-    ]
-    # If steering, set concept prompt for downstream use (e.g. HyperSteer)
-    if getattr(args, "use_steering", False):
-        concept_prompt = prompt_cfg.get("concept")
-        args.concept_prompt = concept_prompt
+    if args.benchmark == "gsm8k":
+        prompts = [
+            template.format(question=ex["question"])
+            for ex in dataset_list
+        ]
+    elif args.benchmark == "supergpqa":
+        prompts = [
+            template.format(
+                question=ex["question"],
+                options="\n".join([f"{chr(ord('A')+i)}. {opt}" for i, opt in enumerate(ex["options"])])
+            )
+            for ex in dataset_list
+        ]
+    # For SuperGPQA, set concept_prompt using helper
+    if args.benchmark == "supergpqa":
+        args.concept_prompt = resolve_supergpqa_concept(args, dataset_list)
+        logger.warning(f"[Benchmark] Using concept_prompt='{args.concept_prompt}'")
 
     outputs = runner.run_batches(
         prompts,
@@ -571,27 +632,38 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
     pbar = tqdm(
         zip(dataset_list, outputs),
         total=len(dataset_list),
-        desc=f"GSM8K Rank {rank}",
+        desc=f"{args.benchmark.upper()} Rank {rank}",
         leave=True,
     )
 
     for ex, out in pbar:
-        gold = parse_gsm8k_gold(ex["answer"])
         prompt_str = prompts[total]
         resp = out
-        pred = parse_gsm8k_pred(resp)
-        is_correct = (pred == gold) and (gold is not None) and (pred is not None)
+        if args.benchmark == "gsm8k":
+            gold = parse_gsm8k_gold(ex["answer"])
+            pred = parse_gsm8k_pred(resp)
+            is_correct = (pred == gold) and (gold is not None) and (pred is not None)
+        elif args.benchmark == "supergpqa":
+            gold = ex["answer_letter"]
+            pred = parse_supergpqa_pred(resp)
+            is_correct = (pred == gold) and (gold is not None) and (pred is not None)
         correct += int(is_correct)
         total += 1
 
-        records.append({
+        rec = {
             "question": ex["question"],
             "gold": gold,
             "pred": pred,
             "correct": is_correct,
             "response": resp,
             "response_length": len(resp),
-        })
+        }
+        if args.benchmark == "supergpqa":
+            rec["options"] = ex["options"]
+            rec["answer_letter"] = ex["answer_letter"]
+            rec["discipline"] = ex["discipline"]
+            rec["field"] = ex["field"]
+        records.append(rec)
 
         if total > 0:
             pbar.set_postfix(acc=f"{correct / total:.3f}")
@@ -606,20 +678,24 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
     if rank == 0:
         acc = correct_t.item() / max(1, total_t.item())
         logger.warning(
-            f"[Benchmark:GSM8K] Accuracy={acc:.4f} "
+            f"[Benchmark:{args.benchmark.upper()}] Accuracy={acc:.4f} "
             f"({correct_t.item()}/{total_t.item()})"
         )
-        out_dir = Path(args.dump_dir) / "benchmark"
+        out_dir = Path(args.dump_dir) / f"benchmark_{args.benchmark}"
         out_dir.mkdir(parents=True, exist_ok=True)
-        with open(out_dir / "gsm8k_results.jsonl", "w") as f:
+        with open(out_dir / f"{args.benchmark}_results.jsonl", "w") as f:
             for r in records:
                 f.write(json.dumps(r) + "\n")
-        with open(out_dir / "gsm8k_summary.json", "w") as f:
-            json.dump({
-                "benchmark": "gsm8k",
-                "accuracy": acc,
-                "num_questions": total_t.item()
-            }, f, indent=2)
+        summary = {
+            "benchmark": args.benchmark,
+            "accuracy": acc,
+            "num_questions": total_t.item()
+        }
+        if args.benchmark == "supergpqa":
+            summary["discipline"] = getattr(args, "supergpqa_discipline", None)
+            summary["field"] = getattr(args, "supergpqa_field", None)
+        with open(out_dir / f"{args.benchmark}_summary.json", "w") as f:
+            json.dump(summary, f, indent=2)
 
 
 # --------------------- Benchmark Steered Inference Function ---------------------
@@ -627,9 +703,23 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
 def infer_benchmark_steered(args, rank, world_size, device, logger, training_args):
     assert world_size == 1, "benchmark_steered currently supports single-process only"
 
-    dataset = load_dataset("gsm8k", "main", split="test")
-    if getattr(args, "max_questions", None) is not None:
-        dataset = dataset.select(range(min(len(dataset), args.max_questions)))
+    # Load dataset according to benchmark
+    if args.benchmark == "gsm8k":
+        dataset = load_dataset("gsm8k", "main", split="test")
+        if getattr(args, "max_questions", None) is not None:
+            dataset = dataset.select(range(min(len(dataset), args.max_questions)))
+        dataset_list = list(dataset)
+    elif args.benchmark == "supergpqa":
+        dataset = load_dataset("m-a-p/SuperGPQA", split="test")
+        if getattr(args, "supergpqa_discipline", None) is not None:
+            dataset = dataset.filter(lambda ex: ex["discipline"] == args.supergpqa_discipline)
+        if getattr(args, "supergpqa_field", None) is not None:
+            dataset = dataset.filter(lambda ex: ex["field"] == args.supergpqa_field)
+        if getattr(args, "max_questions", None) is not None:
+            dataset = dataset.select(range(min(len(dataset), args.max_questions)))
+        dataset_list = list(dataset)
+    else:
+        raise ValueError(f"Unsupported benchmark: {args.benchmark}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.padding_side = "left"
@@ -673,15 +763,28 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         return orig_forward(*a, **kw)
     benchmark_model.ax.forward = _wrapped_forward
 
-    # ---- Build GSM8K prompts ----
-    prompt_cfg = BENCHMARK_PROMPTS["gsm8k"]
-    prompts = [
-        prompt_cfg["base"].format(question=ex["question"])
-        for ex in dataset
-    ]
+    # ---- Build prompts ----
+    prompt_cfg = BENCHMARK_PROMPTS[args.benchmark]
+    if args.benchmark == "gsm8k":
+        prompts = [
+            prompt_cfg["base"].format(question=ex["question"])
+            for ex in dataset_list
+        ]
+        input_concept = "Basic Arithmetic Reasoning"
+    elif args.benchmark == "supergpqa":
+        prompts = [
+            prompt_cfg["base"].format(
+                question=ex["question"],
+                options="\n".join([f"{chr(ord('A')+i)}. {opt}" for i, opt in enumerate(ex["options"])])
+            )
+            for ex in dataset_list
+        ]
+        input_concept = resolve_supergpqa_concept(args, dataset_list)
+        logger.warning(
+            f"[Benchmark+Steering] Using concept_prompt='{input_concept}'"
+        )
 
     # ---- Parse steering factors ----
-    # Parse steering factors
     if getattr(args, "steering_factors", None) is None:
         steering_factors = [1.0]
     elif isinstance(args.steering_factors, str):
@@ -711,16 +814,14 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         args.do_sample = False
 
     sweep_summary = []
-    out_dir = Path(args.dump_dir) / "benchmark_steered"
+    out_dir = Path(args.dump_dir) / f"benchmark_{args.benchmark}_steered"
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    dataset_list = list(dataset)
 
     for factor in steering_factors:
         df = pd.DataFrame({
             "input": prompts,
             "output": ["" for _ in prompts],
-            "input_concept": ["Basic Arithmetic Reasoning" for _ in prompts],
+            "input_concept": [input_concept for _ in prompts],
             "concept_id": [0 for _ in prompts],
             "factor": [float(factor) for _ in prompts],
             "input_id": list(range(len(prompts))),
@@ -754,12 +855,17 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         records = []
 
         for ex, out in zip(dataset_list, outputs):
-            gold = parse_gsm8k_gold(ex["answer"])
-            pred = parse_gsm8k_pred(out)
-            ok = (gold is not None) and (pred == gold)
+            if args.benchmark == "gsm8k":
+                gold = parse_gsm8k_gold(ex["answer"])
+                pred = parse_gsm8k_pred(out)
+                ok = (gold is not None) and (pred == gold)
+            elif args.benchmark == "supergpqa":
+                gold = ex["answer_letter"]
+                pred = parse_supergpqa_pred(out)
+                ok = (gold is not None) and (pred == gold)
             correct += int(ok)
             total += 1
-            records.append({
+            rec = {
                 "question": ex["question"],
                 "gold": gold,
                 "pred": pred,
@@ -767,26 +873,36 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
                 "factor": factor,
                 "response": out,
                 "response_length": len(out),
-            })
+            }
+            if args.benchmark == "supergpqa":
+                rec["options"] = ex["options"]
+                rec["answer_letter"] = ex["answer_letter"]
+                rec["discipline"] = ex["discipline"]
+                rec["field"] = ex["field"]
+            records.append(rec)
 
         acc = correct / max(1, total)
         logger.warning(
-            f"[Benchmark:GSM8K+Steering] factor={factor} Accuracy={acc:.4f} ({correct}/{total})"
+            f"[Benchmark:{args.benchmark.upper()}+Steering] factor={factor} Accuracy={acc:.4f} ({correct}/{total})"
         )
 
-        with open(out_dir / f"gsm8k_results_factor_{factor}.jsonl", "w") as f:
+        with open(out_dir / f"{args.benchmark}_results_factor_{factor}.jsonl", "w") as f:
             for r in records:
                 f.write(json.dumps(r) + "\n")
 
-        with open(out_dir / f"gsm8k_summary_factor_{factor}.json", "w") as f:
-            json.dump({
-                "benchmark": "gsm8k",
-                "steered": True,
-                "factor": factor,
-                "accuracy": acc,
-                "correct": correct,
-                "total": total,
-            }, f, indent=2)
+        summary = {
+            "benchmark": args.benchmark,
+            "steered": True,
+            "factor": factor,
+            "accuracy": acc,
+            "correct": correct,
+            "total": total,
+        }
+        if args.benchmark == "supergpqa":
+            summary["discipline"] = getattr(args, "supergpqa_discipline", None)
+            summary["field"] = getattr(args, "supergpqa_field", None)
+        with open(out_dir / f"{args.benchmark}_summary_factor_{factor}.json", "w") as f:
+            json.dump(summary, f, indent=2)
 
         sweep_summary.append({
             "factor": factor,
@@ -796,7 +912,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         })
 
     # Save sweep summary
-    with open(out_dir / "gsm8k_sweep_summary.json", "w") as f:
+    with open(out_dir / f"{args.benchmark}_sweep_summary.json", "w") as f:
         json.dump(sweep_summary, f, indent=2)
 
 
@@ -1947,7 +2063,7 @@ def main():
             'kwargs': {
                 'type': str,
                 'default': "gsm8k",
-                'help': 'Benchmark name (gsm8k)'
+                'help': 'Benchmark name (gsm8k, supergpqa)'
             }
         },
         {
@@ -1955,23 +2071,23 @@ def main():
             'kwargs': {
                 'type': int,
                 'default': None,
-                'help': 'Max number of benchmark questions'
+                'help': 'Max number of questions to evaluate (for benchmarking).'
             }
         },
         {
-            'args': ['--benchmark_batch_size'],
+            'args': ['--supergpqa_discipline'],
             'kwargs': {
-                'type': int,
-                'default': 8,
-                'help': 'Benchmark batch size'
+                'type': str,
+                'default': None,
+                'help': 'Discipline filter for SuperGPQA benchmark.'
             }
         },
         {
-            'args': ['--use_steering'],
+            'args': ['--supergpqa_field'],
             'kwargs': {
-                'type': bool,
-                'default': False,
-                'help': 'Use steering prompt (CoT/HyperSteer style)'
+                'type': str,
+                'default': None,
+                'help': 'Field filter for SuperGPQA benchmark.'
             }
         },
     ]
