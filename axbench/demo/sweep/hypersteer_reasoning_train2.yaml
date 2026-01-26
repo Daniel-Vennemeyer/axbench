@@ -47,4 +47,4 @@ inference:
 
   # Benchmark-specific
   benchmark_batch_size: 8
-  max_questions: 10
+  max_questions: 1000
