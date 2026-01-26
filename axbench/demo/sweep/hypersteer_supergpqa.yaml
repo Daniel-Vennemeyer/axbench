@@ -25,7 +25,8 @@ train:
       hypernet_initialize_from_pretrained: true
 inference:
   mode: benchmark
-  benchmark: gsm8k
+  benchmark: supergpqa
+  supergpqa_discipline: Medicine
 
   # Base LM
   model_name: google/gemma-2-2b-it
