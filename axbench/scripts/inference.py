@@ -461,6 +461,24 @@ def parse_supergpqa_pred(text):
     m = re.search(r"\b([A-J])\b", text.strip(), re.IGNORECASE)
     return m.group(1).upper() if m else None
 
+# --- Helper: Binomial 95% Wilson confidence interval ---
+def binomial_ci_95(correct, total):
+    """
+    Compute a 95% Wilson confidence interval for a binomial proportion.
+    Returns (low, high). If total == 0, returns (0.0, 0.0).
+    """
+    if total == 0:
+        return 0.0, 0.0
+    import math
+    z = 1.96
+    p = correct / total
+    denom = 1 + z**2 / total
+    center = (p + z**2 / (2 * total)) / denom
+    margin = (
+        z * math.sqrt((p * (1 - p) + z**2 / (4 * total)) / total)
+    ) / denom
+    return max(0.0, center - margin), min(1.0, center + margin)
+
 def parse_gsm8k_pred(text):
     """
     Parse the predicted GSM8K answer robustly.
@@ -724,8 +742,10 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
 
     if rank == 0:
         acc = correct_t.item() / max(1, total_t.item())
+        ci_low, ci_high = binomial_ci_95(correct_t.item(), total_t.item())
         logger.warning(
             f"[Benchmark:{args.benchmark.upper()}] Accuracy={acc:.4f} "
+            f"95% CI=({ci_low:.4f}, {ci_high:.4f}) "
             f"({correct_t.item()}/{total_t.item()})"
         )
         out_dir = Path(args.dump_dir) / f"benchmark_{args.benchmark}"
@@ -736,7 +756,8 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
         summary = {
             "benchmark": args.benchmark,
             "accuracy": acc,
-            "num_questions": total_t.item()
+            "num_questions": total_t.item(),
+            "ci_95": {"low": ci_low, "high": ci_high}
         }
         if args.benchmark == "supergpqa":
             summary["discipline"] = getattr(args, "supergpqa_discipline", None)
@@ -989,8 +1010,12 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
             records.append(rec)
 
         acc = correct / max(1, total)
+        ci_low, ci_high = binomial_ci_95(correct, total)
         logger.warning(
-            f"[Benchmark:{args.benchmark.upper()}+Steering] factor={factor} Accuracy={acc:.4f} ({correct}/{total})"
+            f"[Benchmark:{args.benchmark.upper()}+Steering] "
+            f"factor={factor} Accuracy={acc:.4f} "
+            f"95% CI=({ci_low:.4f}, {ci_high:.4f}) "
+            f"({correct}/{total})"
         )
 
         with open(out_dir / f"{args.benchmark}_results_factor_{factor}.jsonl", "w") as f:
@@ -1004,6 +1029,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
             "accuracy": acc,
             "correct": correct,
             "total": total,
+            "ci_95": {"low": ci_low, "high": ci_high}
         }
         if args.benchmark == "supergpqa":
             summary["discipline"] = getattr(args, "supergpqa_discipline", None)
@@ -1014,6 +1040,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         sweep_summary.append({
             "factor": factor,
             "accuracy": acc,
+            "ci_95": {"low": ci_low, "high": ci_high},
             "correct": correct,
             "total": total,
         })
