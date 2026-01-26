@@ -73,7 +73,6 @@ run_task () {
     echo "Running ${name} (${mode}) on GPU ${gpu}"
 
     CMD=(
-      CUDA_VISIBLE_DEVICES="${gpu}"
       uv run python -m torch.distributed.run
       --nproc_per_node=1
       --rdzv_backend=c10d
@@ -100,7 +99,7 @@ run_task () {
     fi
 
     # Run inference
-    OUTPUT="$("${CMD[@]}" 2>&1 || true)"
+    OUTPUT="$(CUDA_VISIBLE_DEVICES="${gpu}" "${CMD[@]}" 2>&1 || true)"
     STATUS=$?
     if [[ $STATUS -ne 0 ]]; then
       echo "⚠️  WARNING: inference command exited with status $STATUS for ${name} (${mode})"
