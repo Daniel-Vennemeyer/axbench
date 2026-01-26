@@ -173,9 +173,9 @@ class DatasetArgs:
                 else:
                     print(f"Warning: Invalid model_param format: {param}. Expected format: key=value")
 
-        print("Final Configuration:")
-        for key in fields:
-            print(f"{key}: {getattr(self, key)}")
+        # print("Final Configuration:")
+        # for key in fields:
+        #     print(f"{key}: {getattr(self, key)}")
 
     @staticmethod
     def _get_argparse_type(field_type: Type) -> Type:
