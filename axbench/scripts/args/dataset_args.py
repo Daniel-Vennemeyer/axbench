@@ -83,6 +83,12 @@ class DatasetArgs:
     ):
         parser = argparse.ArgumentParser(description=description)
         
+        def _add_argument_if_absent(*opt_strs, **kwargs):
+            for opt in opt_strs:
+                if opt in parser._option_string_actions:
+                    return
+            parser.add_argument(*opt_strs, **kwargs)
+
         # Command-line argument for YAML configuration file
         parser.add_argument(
             '--config',
@@ -105,21 +111,34 @@ class DatasetArgs:
             dest='steering_layer',
             help='Alias for steering_layer parameter.'
         )
-        parser.add_argument("--benchmark", type=str, default=None)
-        parser.add_argument("--max_questions", type=int, default=None)
-        parser.add_argument("--benchmark_batch_size", type=int, default=None)
-        parser.add_argument("--benchmark_output_length", type=int, default=None)
+        _add_argument_if_absent("--benchmark", type=str, default=None)
+        _add_argument_if_absent("--max_questions", type=int, default=None)
+        _add_argument_if_absent("--benchmark_batch_size", type=int, default=None)
+        _add_argument_if_absent("--benchmark_output_length", type=int, default=None)
 
-        parser.add_argument("--supergpqa_discipline", type=str, default=None)
-        parser.add_argument("--supergpqa_field", type=str, default=None)
-        parser.add_argument("--supergpqa_subfield", type=str, default=None)
+        _add_argument_if_absent("--supergpqa_discipline", type=str, default=None)
+        _add_argument_if_absent("--supergpqa_field", type=str, default=None)
+        _add_argument_if_absent("--supergpqa_subfield", type=str, default=None)
 
-        parser.add_argument("--concept_prompt", type=str, default=None)
-        parser.add_argument("--supergpqa_auto_concept", action="store_true")
+        _add_argument_if_absent("--concept_prompt", type=str, default=None)
+        _add_argument_if_absent("--supergpqa_auto_concept", action="store_true")
 
         fields = self.__dataclass_fields__
+        skip_fields = {
+            "benchmark",
+            "max_questions",
+            "benchmark_batch_size",
+            "benchmark_output_length",
+            "supergpqa_discipline",
+            "supergpqa_field",
+            "supergpqa_subfield",
+            "concept_prompt",
+            "supergpqa_auto_concept"
+        }
         for field_name, field_def in fields.items():
             if field_name in ['config_file', 'model_params']:
+                continue
+            if field_name in skip_fields:
                 continue
                 
             # Determine field type and appropriate action based on type
