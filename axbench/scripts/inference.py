@@ -50,28 +50,48 @@ LATENT_PROMPT_PREFIX = "Generate a random sentence."
 # --------------------- Benchmark Prompt Registry ---------------------
 BENCHMARK_PROMPTS = {
     "gsm8k": {
+        # "base": (
+        #     "Question:\n{question}\n\n"
+        #     "Please reason step by step. When you are done, give the final answer in one short sentence.\n\n"
+        #     "Therefore, the answer is:"
+        # ),
+        # "steering": (
+        #     "Question:\n{question}\n\n"
+        #     "Please reason step by step. When you are done, give the final answer in one short sentence.\n\n"
+        #     "Therefore, the answer is:"
+        # ),
         "base": (
             "Question:\n{question}\n\n"
-            "Please reason step by step. When you are done, give the final answer in one short sentence.\n\n"
-            "Therefore, the answer is:"
+            "Report give the final answer as the correct option letter (A-J).\n\n"
+            "Response:"
         ),
         "steering": (
             "Question:\n{question}\n\n"
-            "Please reason step by step. When you are done, give the final answer in one short sentence.\n\n"
-            "Therefore, the answer is:"
+            "Report give the final answer as the correct option letter (A-J).\n\n"
+            "Response:"
         ),
         "concept": "Basic Arithmetic Reasoning",
     },
     "supergpqa": {
-        "base": (
+        # "base": (
+        #     "Question:\n{question}\n\nOptions:\n{options}\n\n"
+        #     "Please reason step by step. When you are done, give the final answer as the correct option letter (A-J).\n\n"
+        #     "Therefore, the answer is:"
+        # ),
+        # "steering": (
+        #     "Question:\n{question}\n\nOptions:\n{options}\n\n"
+        #     "Please reason step by step. When you are done, give the final answer as the correct option letter (A-J).\n\n"
+        #     "Therefore, the answer is:"
+        # ),
+                "base": (
             "Question:\n{question}\n\nOptions:\n{options}\n\n"
-            "Please reason step by step. When you are done, give the final answer as the correct option letter (A-J).\n\n"
-            "Therefore, the answer is:"
+            "Report the final answer as the correct option letter (A-J).\n\n"
+            "Response:"
         ),
         "steering": (
             "Question:\n{question}\n\nOptions:\n{options}\n\n"
-            "Please reason step by step. When you are done, give the final answer as the correct option letter (A-J).\n\n"
-            "Therefore, the answer is:"
+            "Report give the final answer as the correct option letter (A-J).\n\n"
+            "Response:"
         ),
         # concept intentionally omitted; handled by resolve_supergpqa_concept
     },
