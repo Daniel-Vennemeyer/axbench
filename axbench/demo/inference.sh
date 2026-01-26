@@ -25,6 +25,7 @@ gpu_idx=0
 port_offset=0
 
 declare -a PIDS=()
+JOB_INDEX=0
 
 MAX_JOBS=${#GPUS[@]}
 
@@ -82,12 +83,10 @@ run_task () {
     MODES=(auto prompt)
   fi
 
-  JOB_INDEX=0
-
   for mode in "${MODES[@]}"; do
+    wait_for_slot
     gpu="${GPUS[$((JOB_INDEX % ${#GPUS[@]}))]}"
     JOB_INDEX=$((JOB_INDEX + 1))
-    wait_for_slot
 
     port="$(next_port)"
 
