@@ -24,6 +24,8 @@ BASE_PORT=29502
 gpu_idx=0
 port_offset=0
 
+declare -a PIDS=()
+
 next_gpu() {
   local gpu="${GPUS[$gpu_idx]}"
   gpu_idx=$(( (gpu_idx + 1) % ${#GPUS[@]} ))
@@ -99,20 +101,23 @@ run_task () {
     fi
 
     # Run inference
-    OUTPUT="$(CUDA_VISIBLE_DEVICES="${gpu}" "${CMD[@]}" 2>&1 || true)"
-    STATUS=$?
-    if [[ $STATUS -ne 0 ]]; then
-      echo "⚠️  WARNING: inference command exited with status $STATUS for ${name} (${mode})"
-    fi
+    (
+      OUTPUT="$(CUDA_VISIBLE_DEVICES="${gpu}" "${CMD[@]}" 2>&1 || true)"
+      STATUS=$?
+      if [[ $STATUS -ne 0 ]]; then
+        echo "⚠️  WARNING: inference command exited with status $STATUS for ${name} (${mode})"
+      fi
 
-    # ---- Extract per-factor accuracies from stdout ----
-    echo "${OUTPUT}" | \
-      grep -E "Benchmark:.*SUPERGPQA\+Steering.*Accuracy=" | \
-      while read -r line; do
-        FACTOR=$(echo "$line" | sed -E 's/.*factor=([0-9.]+).*/\1/')
-        ACCURACY=$(echo "$line" | sed -E 's/.*Accuracy=([0-9.]+).*/\1/')
-        echo "${benchmark},${discipline:-${field}},${MODE_LABEL},${PROMPT_LABEL},${FACTOR},${ACCURACY}" >> "${OUT_CSV}"
-      done
+      echo "${OUTPUT}" | \
+        grep -E "Benchmark:.*SUPERGPQA\\+Steering.*Accuracy=" | \
+        while read -r line; do
+          FACTOR=$(echo "$line" | sed -E 's/.*factor=([0-9.]+).*/\1/')
+          ACCURACY=$(echo "$line" | sed -E 's/.*Accuracy=([0-9.]+).*/\1/')
+          echo "${benchmark},${discipline:-${field}},${MODE_LABEL},${PROMPT_LABEL},${FACTOR},${ACCURACY}" >> "${OUT_CSV}"
+        done
+    ) &
+
+    PIDS+=($!)
   done
 }
 
@@ -122,6 +127,11 @@ run_task () {
 
 for task in "${TASKS[@]}"; do
   run_task "${task}"
+done
+
+echo "Waiting for all GPU jobs to complete..."
+for pid in "${PIDS[@]}"; do
+  wait "$pid"
 done
 
 echo "========================================"
