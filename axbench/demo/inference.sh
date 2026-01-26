@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 ############################################
 # Config
@@ -100,10 +100,14 @@ run_task () {
     fi
 
     # Run inference
-    OUTPUT="$("${CMD[@]}" 2>&1)"
+    OUTPUT="$("${CMD[@]}" 2>&1 || true)"
+    STATUS=$?
+    if [[ $STATUS -ne 0 ]]; then
+      echo "⚠️  WARNING: inference command exited with status $STATUS for ${name} (${mode})"
+    fi
 
     # ---- Accuracy extraction ----
-    ACCURACY="$(echo "${OUTPUT}" | grep -Eo 'Accuracy[:=][[:space:]]*[0-9.]+' | tail -1 | grep -Eo '[0-9.]+')"
+    ACCURACY="$(echo "${OUTPUT}" | grep -Eo 'Accuracy[:=][[:space:]]*[0-9.]+' | tail -1 | grep -Eo '[0-9.]+' || true)"
 
     if [[ -z "${ACCURACY}" ]]; then
       echo "⚠️  WARNING: No accuracy found for ${name} (${mode})"
