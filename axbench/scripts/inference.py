@@ -713,15 +713,38 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         dataset_list = list(dataset)
     elif args.benchmark == "supergpqa":
         dataset = load_dataset("m-a-p/SuperGPQA", split="train")
+
+        # Case-insensitive filtering (dataset values are usually Title Case like "Medicine")
         if getattr(args, "supergpqa_discipline", None) is not None:
-            dataset = dataset.filter(lambda ex: ex["discipline"] == args.supergpqa_discipline)
+            want = str(args.supergpqa_discipline).strip().lower()
+            dataset = dataset.filter(lambda ex: str(ex.get("discipline", "")).strip().lower() == want)
+
         if getattr(args, "supergpqa_field", None) is not None:
-            dataset = dataset.filter(lambda ex: ex["field"] == args.supergpqa_field)
+            want = str(args.supergpqa_field).strip().lower()
+            dataset = dataset.filter(lambda ex: str(ex.get("field", "")).strip().lower() == want)
+
+        if getattr(args, "supergpqa_subfield", None) is not None:
+            want = str(args.supergpqa_subfield).strip().lower()
+            dataset = dataset.filter(lambda ex: str(ex.get("subfield", "")).strip().lower() == want)
+
+        if len(dataset) == 0:
+            raise ValueError(
+                "SuperGPQA filter produced 0 examples. "
+                f"discipline={getattr(args, 'supergpqa_discipline', None)!r}, "
+                f"field={getattr(args, 'supergpqa_field', None)!r}, "
+                f"subfield={getattr(args, 'supergpqa_subfield', None)!r}. "
+                "Try different casing or remove the filter."
+            )
+
         if getattr(args, "max_questions", None) is not None:
             dataset = dataset.select(range(min(len(dataset), args.max_questions)))
+
         dataset_list = list(dataset)
     else:
         raise ValueError(f"Unsupported benchmark: {args.benchmark}")
+
+    if len(dataset_list) == 0:
+        raise ValueError(f"No benchmark examples loaded for {args.benchmark}. Check your filters and max_questions.")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.padding_side = "left"
@@ -795,7 +818,12 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         steering_factors = list(args.steering_factors)
 
     batch_size = int(getattr(args, "benchmark_batch_size", 8))
-    eval_output_length = int(getattr(args, "steering_output_length", 256) or 256)
+    # Prefer benchmark_output_length for benchmark runs; fallback to steering_output_length; then 256.
+    eval_output_length = int(
+        (getattr(args, "benchmark_output_length", None)
+         or getattr(args, "steering_output_length", None)
+         or 256)
+    )
 
     # ---- Set prefix_length for chat models ----
     prefix_length = 1
