@@ -26,28 +26,24 @@ port_offset=0
 
 declare -a PIDS=()
 
-declare -A GPU_PIDS=()
-for g in "${GPUS[@]}"; do
-  GPU_PIDS[$g]=""
-done
+MAX_JOBS=${#GPUS[@]}
 
-acquire_gpu() {
+wait_for_slot() {
   while true; do
-    for g in "${GPUS[@]}"; do
-      pid="${GPU_PIDS[$g]}"
-      if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
-        GPU_PIDS[$g]="$BASHPID"
-        echo "$g"
-        return
+    # Clean up finished jobs
+    local new_pids=()
+    for pid in "${PIDS[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        new_pids+=("$pid")
       fi
     done
+    PIDS=("${new_pids[@]}")
+
+    if (( ${#PIDS[@]} < MAX_JOBS )); then
+      return
+    fi
     sleep 5
   done
-}
-
-release_gpu() {
-  local g="$1"
-  GPU_PIDS[$g]=""
 }
 
 next_port() {
@@ -86,8 +82,13 @@ run_task () {
     MODES=(auto prompt)
   fi
 
+  JOB_INDEX=0
+
   for mode in "${MODES[@]}"; do
-    gpu="$(acquire_gpu)"
+    gpu="${GPUS[$((JOB_INDEX % ${#GPUS[@]}))]}"
+    JOB_INDEX=$((JOB_INDEX + 1))
+    wait_for_slot
+
     port="$(next_port)"
 
     echo "Running ${name} (${mode}) on GPU ${gpu}"
@@ -120,21 +121,21 @@ run_task () {
 
     # Run inference
     (
-      OUTPUT="$(CUDA_VISIBLE_DEVICES="${gpu}" "${CMD[@]}" 2>&1 || true)"
-      STATUS=$?
+      LOG_FILE="runs/logs/${name}_${mode}_gpu${gpu}.log"
+      mkdir -p runs/logs
+      CUDA_VISIBLE_DEVICES="${gpu}" "${CMD[@]}" 2>&1 | tee "${LOG_FILE}"
+      STATUS=${PIPESTATUS[1]}
       if [[ $STATUS -ne 0 ]]; then
         echo "⚠️  WARNING: inference command exited with status $STATUS for ${name} (${mode})"
       fi
 
-      echo "${OUTPUT}" | \
-        grep -E "Benchmark:.*SUPERGPQA\\+Steering.*Accuracy=" | \
+      grep -E "Benchmark:.*SUPERGPQA\\+Steering.*Accuracy=" "${LOG_FILE}" | \
         while read -r line; do
           FACTOR=$(echo "$line" | sed -E 's/.*factor=([0-9.]+).*/\1/')
           ACCURACY=$(echo "$line" | sed -E 's/.*Accuracy=([0-9.]+).*/\1/')
           echo "${benchmark},${discipline:-${field}},${MODE_LABEL},${PROMPT_LABEL},${FACTOR},${ACCURACY}" >> "${OUT_CSV}"
         done
 
-      release_gpu "${gpu}"
     ) &
 
     PIDS+=($!)
