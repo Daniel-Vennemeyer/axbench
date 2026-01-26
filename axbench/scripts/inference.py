@@ -563,9 +563,11 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
         dataset = load_dataset("m-a-p/SuperGPQA", split="train")
         # Filter by discipline and field if specified
         if getattr(args, "supergpqa_discipline", None) is not None:
-            dataset = dataset.filter(lambda ex: ex["discipline"] == args.supergpqa_discipline)
+            want = str(args.supergpqa_discipline).strip().lower()
+            dataset = dataset.filter(lambda ex: str(ex.get("discipline", "")).strip().lower() == want)
         if getattr(args, "supergpqa_field", None) is not None:
-            dataset = dataset.filter(lambda ex: ex["field"] == args.supergpqa_field)
+            want = str(args.supergpqa_field).strip().lower()
+            dataset = dataset.filter(lambda ex: str(ex.get("field", "")).strip().lower() == want)
         if getattr(args, "max_questions", None) is not None:
             dataset = dataset.select(range(min(len(dataset), args.max_questions)))
         # shard dataset across ranks
