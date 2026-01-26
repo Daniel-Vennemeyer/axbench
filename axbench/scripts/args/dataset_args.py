@@ -83,9 +83,11 @@ class DatasetArgs:
     ):
         parser = argparse.ArgumentParser(description=description)
         
-        def _add_argument_if_absent(*opt_strs, **kwargs):
+        import warnings
+        def _add_argument_if_absent(*opt_strs, ignore_unknown=False, **kwargs):
             for opt in opt_strs:
                 if opt in parser._option_string_actions:
+                    warnings.warn(f"Argument {opt} already registered, skipping duplicate.")
                     return
             parser.add_argument(*opt_strs, **kwargs)
 
@@ -160,7 +162,7 @@ class DatasetArgs:
 
         if custom_args:
             for arg in custom_args:
-                parser.add_argument(*arg['args'], **arg['kwargs'])
+                _add_argument_if_absent(*arg['args'], ignore_unknown=ignore_unknown, **arg['kwargs'])
                 if '--suppress_eval_dir' in arg['args']:
                     self.suppress_eval_dir = arg['kwargs'].get('default', None)
 
