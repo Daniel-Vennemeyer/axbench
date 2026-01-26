@@ -492,6 +492,7 @@ class HyperSteer(Model):
 
     @torch.no_grad()
     def predict_steer(self, examples, **kwargs):
+        compute_loss = kwargs.get("compute_loss", True)
         self.ax.eval()
         
         return_vector = kwargs.get("return_vector", False)
@@ -579,34 +580,51 @@ class HyperSteer(Model):
         
             all_generations += generated_texts
 
-            # Calculate perplexity for each sequence
-            unpruned_generated_texts = [
-                self.tokenizer.decode(generation, skip_special_tokens=True)
-                for generation in generations
-            ]
-            batch_input_ids = self.tokenizer(
-                unpruned_generated_texts, return_tensors="pt", padding=True, truncation=True).input_ids.to(self.device)
-            batch_attention_mask = (batch_input_ids != self.tokenizer.pad_token_id).float()
-            
-            # Forward pass without labels to get logits
-            outputs = self.model(input_ids=batch_input_ids, attention_mask=batch_attention_mask)
-            
-            logits = outputs.logits[:, :-1, :].contiguous()  # Remove last token prediction
-            target_ids = batch_input_ids[:, 1:].contiguous()  # Shift right by 1
-            
-            # Calculate loss for each token
-            loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
-            token_losses = loss_fct(logits.view(-1, logits.size(-1)), target_ids.view(-1))
-            
-            # Reshape losses and mask
-            token_losses = token_losses.view(batch_input_ids.size(0), -1)
-            mask = batch_attention_mask[:, 1:].contiguous()
-            
-            # Calculate perplexity for each sequence
-            seq_lengths = mask.sum(dim=1)
-            seq_losses = (token_losses * mask).sum(dim=1) / seq_lengths
-            seq_perplexities = torch.exp(seq_losses).tolist()
-            all_perplexities.extend(seq_perplexities)
+            if compute_loss:
+                # Calculate perplexity for each sequence
+                unpruned_generated_texts = [
+                    self.tokenizer.decode(generation, skip_special_tokens=True)
+                    for generation in generations
+                ]
+                batch_input_ids = self.tokenizer(
+                    unpruned_generated_texts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True
+                ).input_ids.to(self.device)
+
+                batch_attention_mask = (batch_input_ids != self.tokenizer.pad_token_id).float()
+
+                # Forward pass to get logits
+                outputs = self.model(
+                    input_ids=batch_input_ids,
+                    attention_mask=batch_attention_mask
+                )
+
+                logits = outputs.logits[:, :-1, :].contiguous()
+                target_ids = batch_input_ids[:, 1:].contiguous()
+
+                loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+                token_losses = loss_fct(
+                    logits.view(-1, logits.size(-1)),
+                    target_ids.view(-1)
+                )
+
+                token_losses = token_losses.view(batch_input_ids.size(0), -1)
+                mask = batch_attention_mask[:, 1:].contiguous()
+
+                seq_lengths = mask.sum(dim=1)
+                seq_losses = (token_losses * mask).sum(dim=1) / seq_lengths
+                seq_perplexities = torch.exp(seq_losses).tolist()
+
+                all_perplexities.extend(seq_perplexities)
+
+                # Explicitly free large tensors to avoid fragmentation
+                del outputs, logits, token_losses, batch_input_ids, batch_attention_mask
+                torch.cuda.empty_cache()
+            else:
+                # Skip loss computation entirely (benchmark fast-path)
+                all_perplexities.extend([None] * len(generations))
             all_strenghts.extend((mag).tolist())
             progress_bar.update(1)
             
