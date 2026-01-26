@@ -12,6 +12,7 @@ from pathlib import Path
 import atexit
 import re
 from datasets import load_dataset
+from datasets import DownloadMode
 
 from axbench.utils.dataset import (
     DatasetFactory,
@@ -98,6 +99,50 @@ def resolve_supergpqa_concept(args, dataset_list):
         return f"{subfield} Reasoning"
 
     return "Medical Knowledge Reasoning"
+
+# --- Helper: robust dataset loading (avoids broken HF cache issues) ---
+def safe_load_dataset(dataset_name, split, dump_dir=None, **kwargs):
+    """Load an HF dataset with a fallback retry that bypasses potentially corrupted caches.
+
+    We occasionally see failures like:
+      TypeError: must be called with a dataclass type or instance
+    from `datasets` when it tries to read cached DatasetInfo/features.
+
+    Strategy:
+      1) Try normal load_dataset
+      2) On known cache/feature errors, retry with an isolated cache_dir under dump_dir
+         and force redownload.
+    """
+    try:
+        return load_dataset(dataset_name, split=split, **kwargs)
+    except Exception as e:
+        msg = str(e)
+        known = (
+            "must be called with a dataclass type" in msg
+            or "DatasetInfo.from_directory" in msg
+            or "Features.from_dict" in msg
+        )
+        if not known:
+            raise
+
+        # Retry with a fresh per-run cache to avoid corrupted global cache entries
+        cache_dir = None
+        if dump_dir is not None:
+            cache_dir = str(Path(dump_dir) / "hf_datasets_cache")
+            Path(cache_dir).mkdir(parents=True, exist_ok=True)
+
+        logger.warning(
+            f"[Warn] load_dataset('{dataset_name}', split='{split}') failed with a cache/features error; "
+            f"retrying with force redownload and cache_dir={cache_dir!r}. Original error: {msg}"
+        )
+
+        return load_dataset(
+            dataset_name,
+            split=split,
+            cache_dir=cache_dir,
+            download_mode=DownloadMode.FORCE_REDOWNLOAD,
+            **kwargs,
+        )
 
 def load_config(config_path):
     """
@@ -560,7 +605,7 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
         dataset = dataset.shard(num_shards=world_size, index=rank)
         dataset_list = list(dataset)
     elif args.benchmark == "supergpqa":
-        dataset = load_dataset("m-a-p/SuperGPQA", split="train")
+        dataset = safe_load_dataset("m-a-p/SuperGPQA", split="train", dump_dir=args.dump_dir)
         # Filter by discipline and field if specified
         if getattr(args, "supergpqa_discipline", None) is not None:
             want = str(args.supergpqa_discipline).strip().lower()
@@ -712,7 +757,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
             dataset = dataset.select(range(min(len(dataset), args.max_questions)))
         dataset_list = list(dataset)
     elif args.benchmark == "supergpqa":
-        dataset = load_dataset("m-a-p/SuperGPQA", split="train")
+        dataset = safe_load_dataset("m-a-p/SuperGPQA", split="train", dump_dir=args.dump_dir)
 
         # Case-insensitive filtering (dataset values are usually Title Case like "Medicine")
         if getattr(args, "supergpqa_discipline", None) is not None:
@@ -739,6 +784,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         if getattr(args, "max_questions", None) is not None:
             dataset = dataset.select(range(min(len(dataset), args.max_questions)))
 
+        logger.warning(f"[Benchmark:SUPERGPQA] Loaded {len(dataset)} examples after filtering (before max_questions).")
         dataset_list = list(dataset)
     else:
         raise ValueError(f"Unsupported benchmark: {args.benchmark}")
