@@ -845,11 +845,30 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
             return_vector=False,
         )
 
-        outputs = (
-            results.get("steered_generation")
-            or results.get("generation")
-            or results.get("output")
-        )
+        # --- Robust extraction of generations across model implementations ---
+        outputs = None
+        if isinstance(results, dict):
+            # Common keys
+            for k in ["steered_generation", "generation", "output", "outputs", "text"]:
+                v = results.get(k, None)
+                if isinstance(v, list) and len(v) == len(prompts):
+                    outputs = v
+                    break
+            # Fallback: pick any list-valued entry that matches expected length
+            if outputs is None:
+                for k, v in results.items():
+                    if isinstance(v, list) and len(v) == len(prompts):
+                        outputs = v
+                        logger.warning(f"[Benchmark+Steering] Using generations from results['{k}']")
+                        break
+
+        if outputs is None:
+            available = list(results.keys()) if isinstance(results, dict) else type(results)
+            raise RuntimeError(
+                "HyperSteer.predict_steer did not return a usable generations list. "
+                f"Expected a list of length {len(prompts)} under a known key. "
+                f"Available keys/type: {available}"
+            )
 
         correct, total = 0, 0
         records = []
