@@ -13,7 +13,7 @@ STEERING_FACTORS="0,0.2,0.4,0.6,0.8,1"
 mkdir -p "$(dirname "${OUT_CSV}")"
 
 # CSV header
-echo "benchmark,subset,mode,concept_prompt,steering_factors,accuracy" > "${OUT_CSV}"
+echo "benchmark,subset,mode,concept_prompt,steering_factor,accuracy" > "${OUT_CSV}"
 
 ############################################
 # GPU + port management
@@ -106,15 +106,14 @@ run_task () {
       echo "⚠️  WARNING: inference command exited with status $STATUS for ${name} (${mode})"
     fi
 
-    # ---- Accuracy extraction ----
-    ACCURACY="$(echo "${OUTPUT}" | grep -Eo 'Accuracy[:=][[:space:]]*[0-9.]+' | tail -1 | grep -Eo '[0-9.]+' || true)"
-
-    if [[ -z "${ACCURACY}" ]]; then
-      echo "⚠️  WARNING: No accuracy found for ${name} (${mode})"
-      ACCURACY="NA"
-    fi
-
-    echo "${benchmark},${discipline:-${field}},${MODE_LABEL},${PROMPT_LABEL},\"${STEERING_FACTORS}\",${ACCURACY}" >> "${OUT_CSV}"
+    # ---- Extract per-factor accuracies from stdout ----
+    echo "${OUTPUT}" | \
+      grep -E "Benchmark:.*SUPERGPQA\+Steering.*Accuracy=" | \
+      while read -r line; do
+        FACTOR=$(echo "$line" | sed -E 's/.*factor=([0-9.]+).*/\1/')
+        ACCURACY=$(echo "$line" | sed -E 's/.*Accuracy=([0-9.]+).*/\1/')
+        echo "${benchmark},${discipline:-${field}},${MODE_LABEL},${PROMPT_LABEL},${FACTOR},${ACCURACY}" >> "${OUT_CSV}"
+      done
   done
 }
 
