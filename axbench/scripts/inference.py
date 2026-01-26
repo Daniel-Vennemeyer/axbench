@@ -98,7 +98,7 @@ def resolve_supergpqa_concept(args, dataset_list):
             raise ValueError("SuperGPQA example missing 'subfield'.")
         return f"{subfield} Reasoning"
 
-    return "Medical Knowledge Reasoning"
+    return "Epidemiology Reasoning"
 
 # --- Helper: robust dataset loading (avoids broken HF cache issues) ---
 def safe_load_dataset(dataset_name, split, dump_dir=None, **kwargs):
