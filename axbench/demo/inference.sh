@@ -26,10 +26,28 @@ port_offset=0
 
 declare -a PIDS=()
 
-next_gpu() {
-  local gpu="${GPUS[$gpu_idx]}"
-  gpu_idx=$(( (gpu_idx + 1) % ${#GPUS[@]} ))
-  echo "$gpu"
+declare -A GPU_PIDS=()
+for g in "${GPUS[@]}"; do
+  GPU_PIDS[$g]=""
+done
+
+acquire_gpu() {
+  while true; do
+    for g in "${GPUS[@]}"; do
+      pid="${GPU_PIDS[$g]}"
+      if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+        GPU_PIDS[$g]="$BASHPID"
+        echo "$g"
+        return
+      fi
+    done
+    sleep 5
+  done
+}
+
+release_gpu() {
+  local g="$1"
+  GPU_PIDS[$g]=""
 }
 
 next_port() {
@@ -69,7 +87,7 @@ run_task () {
   fi
 
   for mode in "${MODES[@]}"; do
-    gpu="$(next_gpu)"
+    gpu="$(acquire_gpu)"
     port="$(next_port)"
 
     echo "Running ${name} (${mode}) on GPU ${gpu}"
@@ -115,6 +133,8 @@ run_task () {
           ACCURACY=$(echo "$line" | sed -E 's/.*Accuracy=([0-9.]+).*/\1/')
           echo "${benchmark},${discipline:-${field}},${MODE_LABEL},${PROMPT_LABEL},${FACTOR},${ACCURACY}" >> "${OUT_CSV}"
         done
+
+      release_gpu "${gpu}"
     ) &
 
     PIDS+=($!)
