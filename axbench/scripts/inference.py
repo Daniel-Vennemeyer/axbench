@@ -841,7 +841,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
             prompt_cfg["base"].format(question=ex["question"])
             for ex in dataset_list
         ]
-        input_concept = "Basic Arithmetic Reasoning"
+        input_concepts = ["Basic Arithmetic Reasoning"] * len(prompts)
     elif args.benchmark == "supergpqa":
         prompts = [
             prompt_cfg["base"].format(
@@ -850,9 +850,21 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
             )
             for ex in dataset_list
         ]
-        input_concept = resolve_supergpqa_concept(args, dataset_list)
+        # Resolve concept per-example
+        input_concepts = []
+        for ex in dataset_list:
+            if getattr(args, "supergpqa_auto_concept", False):
+                input_concept = f"{ex['subfield']} Reasoning"
+            elif getattr(args, "concept_prompt", None):
+                input_concept = args.concept_prompt
+            else:
+                input_concept = "Epidemiology Reasoning"
+            input_concepts.append(input_concept)
+        # Logging: state that supergpqa_auto_concept is being resolved per-example
+        unique_concepts = list({c for c in input_concepts})
         logger.warning(
-            f"[Benchmark+Steering] Using concept_prompt='{input_concept}'"
+            f"[Benchmark+Steering] Resolving supergpqa_auto_concept per-example. "
+            f"First 3 unique concepts: {unique_concepts[:3]}"
         )
 
     # ---- Parse steering factors ----
@@ -897,7 +909,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         df = pd.DataFrame({
             "input": prompts,
             "output": ["" for _ in prompts],
-            "input_concept": [input_concept for _ in prompts],
+            "input_concept": input_concepts,
             "concept_id": [0 for _ in prompts],
             "factor": [float(factor) for _ in prompts],
             "input_id": list(range(len(prompts))),
