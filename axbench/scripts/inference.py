@@ -102,17 +102,24 @@ def resolve_supergpqa_concept(args, dataset_list):
 
 # --- Helper: robust dataset loading (avoids broken HF cache issues) ---
 def safe_load_dataset(dataset_name, split, dump_dir=None, **kwargs):
-    """Load an HF dataset with a fallback retry that bypasses potentially corrupted caches.
+    """Load an HF dataset with retries that bypass potentially corrupted caches.
 
     We occasionally see failures like:
       TypeError: must be called with a dataclass type or instance
     from `datasets` when it tries to read cached DatasetInfo/features.
 
+    We also sometimes see cleanup races like:
+      OSError: [Errno 39] Directory not empty: '<...>'
+    during `download_and_prepare` when multiple runs share a cache directory.
+
     Strategy:
       1) Try normal load_dataset
-      2) On known cache/feature errors, retry with an isolated cache_dir under dump_dir
+      2) On known cache/feature errors, retry with an *isolated, unique* cache_dir under dump_dir
          and force redownload.
+      3) If we hit an "Errno 39" cleanup race, delete the offending directory (best-effort)
+         and retry with a fresh cache_dir.
     """
+    # First attempt: normal cache behavior
     try:
         return load_dataset(dataset_name, split=split, **kwargs)
     except Exception as e:
@@ -125,24 +132,61 @@ def safe_load_dataset(dataset_name, split, dump_dir=None, **kwargs):
         if not known:
             raise
 
-        # Retry with a fresh per-run cache to avoid corrupted global cache entries
-        cache_dir = None
+        # Retry with isolated per-run cache directories to avoid cache corruption and rmtree races.
+        base_cache_dir = None
         if dump_dir is not None:
-            cache_dir = str(Path(dump_dir) / "hf_datasets_cache")
-            Path(cache_dir).mkdir(parents=True, exist_ok=True)
+            base_cache_dir = Path(dump_dir) / "hf_datasets_cache"
+            base_cache_dir.mkdir(parents=True, exist_ok=True)
 
         logger.warning(
             f"[Warn] load_dataset('{dataset_name}', split='{split}') failed with a cache/features error; "
-            f"retrying with force redownload and cache_dir={cache_dir!r}. Original error: {msg}"
+            f"retrying with force redownload and an isolated cache_dir under {str(base_cache_dir) if base_cache_dir else None!r}. "
+            f"Original error: {msg}"
         )
 
-        return load_dataset(
-            dataset_name,
-            split=split,
-            cache_dir=cache_dir,
-            download_mode=DownloadMode.FORCE_REDOWNLOAD,
-            **kwargs,
-        )
+        last_err = e
+        for attempt in range(3):
+            # Make the cache_dir unique per attempt to avoid partial/incomplete dir cleanup races.
+            cache_dir = None
+            if base_cache_dir is not None:
+                unique = f"{dataset_name.replace('/', '___').replace(' ', '_')}_pid{os.getpid()}_{int(time.time()*1000)}_try{attempt}"
+                cache_dir = str(base_cache_dir / unique)
+                Path(cache_dir).mkdir(parents=True, exist_ok=True)
+
+            try:
+                return load_dataset(
+                    dataset_name,
+                    split=split,
+                    cache_dir=cache_dir,
+                    download_mode=DownloadMode.FORCE_REDOWNLOAD,
+                    **kwargs,
+                )
+            except OSError as oe:
+                # Sometimes HF datasets hits a cleanup race and fails to rmtree an incomplete dir.
+                # Best-effort delete the directory from the error message, then retry.
+                if getattr(oe, "errno", None) == 39:  # Directory not empty
+                    oe_msg = str(oe)
+                    logger.warning(
+                        f"[Warn] load_dataset retry hit an incomplete_dir cleanup race (Errno 39). "
+                        f"Will best-effort delete the offending directory and retry. Error: {oe_msg}"
+                    )
+                    # Try to extract the quoted path at the end of the message.
+                    m = re.search(r"'([^']+)'\s*$", oe_msg)
+                    if m:
+                        bad_dir = m.group(1)
+                        try:
+                            shutil.rmtree(bad_dir, ignore_errors=True)
+                        except Exception:
+                            pass
+                    last_err = oe
+                    continue
+                last_err = oe
+                continue
+            except Exception as e2:
+                last_err = e2
+                continue
+
+        raise last_err
 
 def load_config(config_path):
     """
