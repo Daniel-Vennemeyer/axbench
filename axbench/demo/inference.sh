@@ -13,7 +13,7 @@ STEERING_FACTORS="0,0.2,0.4,0.6,0.8,1"
 mkdir -p "$(dirname "${OUT_CSV}")"
 
 # CSV header
-echo "benchmark,subset,concept_prompt,steering_factors,accuracy" > "${OUT_CSV}"
+echo "benchmark,subset,mode,concept_prompt,steering_factors,accuracy" > "${OUT_CSV}"
 
 ############################################
 # GPU + port management
@@ -39,17 +39,17 @@ next_port() {
 ############################################
 # Task definitions
 ############################################
-# name | benchmark | discipline | field | concept_prompt | auto_concept
+# name | benchmark | discipline | field | concept_prompt
 
 TASKS=(
-  "gsm8k|gsm8k|||Basic Arithmetic Reasoning|false"
+  "gsm8k|gsm8k|||Basic Arithmetic Reasoning"
 
-  "supergpqa_medicine|supergpqa|medicine||Epidemiology Reasoning|true"
-  "supergpqa_physics|supergpqa||physics|Classical Mechanics Reasoning|true"
-  "supergpqa_chemistry|supergpqa||chemistry|Organic Chemistry Reasoning|true"
-  "supergpqa_history|supergpqa|history||Medieval European History Reasoning|true"
-  "supergpqa_legal|supergpqa|legal||Constitutional Law Reasoning|true"
-  "supergpqa_literature|supergpqa|Literature and Arts||Narrative Structure Reasoning|true"
+  "supergpqa_medicine|supergpqa|medicine||Epidemiology Reasoning"
+  "supergpqa_physics|supergpqa||physics|Classical Mechanics Reasoning"
+  "supergpqa_chemistry|supergpqa||chemistry|Organic Chemistry Reasoning"
+  "supergpqa_history|supergpqa|history||Medieval European History Reasoning"
+  "supergpqa_legal|supergpqa|legal||Constitutional Law Reasoning"
+  "supergpqa_literature|supergpqa|Literature and Arts||Narrative Structure Reasoning"
 )
 
 ############################################
@@ -57,14 +57,17 @@ TASKS=(
 ############################################
 
 run_task () {
-  IFS="|" read -r name benchmark discipline field concept_prompt _ <<< "$1"
+  IFS="|" read -r name benchmark discipline field concept_prompt <<< "$1"
 
-  for mode in auto prompt; do
+  # GSM8K: prompt only
+  if [[ "${benchmark}" == "gsm8k" ]]; then
+    MODES=(prompt)
+  else
+    MODES=(auto prompt)
+  fi
 
-    local gpu
+  for mode in "${MODES[@]}"; do
     gpu="$(next_gpu)"
-
-    local port
     port="$(next_port)"
 
     echo "Running ${name} (${mode}) on GPU ${gpu}"
@@ -96,14 +99,18 @@ run_task () {
       PROMPT_LABEL="${concept_prompt}"
     fi
 
+    # Run inference
     OUTPUT="$("${CMD[@]}" 2>&1)"
 
+    # ---- Accuracy extraction ----
     ACCURACY="$(echo "${OUTPUT}" | grep -Eo 'Accuracy[:=][[:space:]]*[0-9.]+' | tail -1 | grep -Eo '[0-9.]+')"
 
-    [[ -z "${ACCURACY}" ]] && ACCURACY="NA"
+    if [[ -z "${ACCURACY}" ]]; then
+      echo "⚠️  WARNING: No accuracy found for ${name} (${mode})"
+      ACCURACY="NA"
+    fi
 
     echo "${benchmark},${discipline:-${field}},${MODE_LABEL},${PROMPT_LABEL},\"${STEERING_FACTORS}\",${ACCURACY}" >> "${OUT_CSV}"
-
   done
 }
 
@@ -116,6 +123,6 @@ for task in "${TASKS[@]}"; do
 done
 
 echo "========================================"
-echo "All runs complete"
-echo "Saved accuracies to ${OUT_CSV}"
+echo "All runs completed."
+echo "Accuracies saved to ${OUT_CSV}"
 echo "========================================"
