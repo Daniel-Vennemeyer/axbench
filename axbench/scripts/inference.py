@@ -560,7 +560,7 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
         dataset = dataset.shard(num_shards=world_size, index=rank)
         dataset_list = list(dataset)
     elif args.benchmark == "supergpqa":
-        dataset = load_dataset("m-a-p/SuperGPQA", split="test")
+        dataset = load_dataset("m-a-p/SuperGPQA", split="train")
         # Filter by discipline and field if specified
         if getattr(args, "supergpqa_discipline", None) is not None:
             dataset = dataset.filter(lambda ex: ex["discipline"] == args.supergpqa_discipline)
@@ -710,7 +710,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
             dataset = dataset.select(range(min(len(dataset), args.max_questions)))
         dataset_list = list(dataset)
     elif args.benchmark == "supergpqa":
-        dataset = load_dataset("m-a-p/SuperGPQA", split="test")
+        dataset = load_dataset("m-a-p/SuperGPQA", split="train")
         if getattr(args, "supergpqa_discipline", None) is not None:
             dataset = dataset.filter(lambda ex: ex["discipline"] == args.supergpqa_discipline)
         if getattr(args, "supergpqa_field", None) is not None:
