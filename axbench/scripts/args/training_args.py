@@ -244,16 +244,16 @@ class TrainingArgs:
         # Additional attributes
         self.config_file = config_file_path
 
-        # Print the final configuration
-        print("Final Configuration:")
-        print("Global Parameters:")
-        for key in global_params + hierarchical_params:
-            print(f"{key}: {getattr(self, key)}")
-        print("\nPer-Model Parameters:")
-        for model_name, params in self.models:
-            print(f"{model_name}:")
-            for field_name in ModelParams.__dataclass_fields__:
-                print(f"  {field_name}: {getattr(params, field_name)}")
+        # # Print the final configuration
+        # print("Final Configuration:")
+        # print("Global Parameters:")
+        # for key in global_params + hierarchical_params:
+        #     print(f"{key}: {getattr(self, key)}")
+        # print("\nPer-Model Parameters:")
+        # for model_name, params in self.models:
+        #     print(f"{model_name}:")
+        #     for field_name in ModelParams.__dataclass_fields__:
+        #         print(f"  {field_name}: {getattr(params, field_name)}")
 
     @staticmethod
     def _infer_type(param_name: str):
