@@ -57,6 +57,20 @@ class DatasetArgs:
     defense: Optional[List[str]] = None
     multishot_factors_parquet: Optional[str] = None
     suppress_eval_dir: Optional[str] = None
+    # Benchmark evaluation
+    benchmark: str | None = None
+    max_questions: int | None = None
+    benchmark_batch_size: int | None = None
+    benchmark_output_length: int | None = None
+
+    # SuperGPQA filters
+    supergpqa_discipline: str | None = None
+    supergpqa_field: str | None = None
+    supergpqa_subfield: str | None = None
+
+    # Concept control for benchmark_steered
+    concept_prompt: str | None = None
+    supergpqa_auto_concept: bool = False
 
     def __init__(
         self,
@@ -91,6 +105,17 @@ class DatasetArgs:
             dest='steering_layer',
             help='Alias for steering_layer parameter.'
         )
+        parser.add_argument("--benchmark", type=str, default=None)
+        parser.add_argument("--max_questions", type=int, default=None)
+        parser.add_argument("--benchmark_batch_size", type=int, default=None)
+        parser.add_argument("--benchmark_output_length", type=int, default=None)
+
+        parser.add_argument("--supergpqa_discipline", type=str, default=None)
+        parser.add_argument("--supergpqa_field", type=str, default=None)
+        parser.add_argument("--supergpqa_subfield", type=str, default=None)
+
+        parser.add_argument("--concept_prompt", type=str, default=None)
+        parser.add_argument("--supergpqa_auto_concept", action="store_true")
 
         fields = self.__dataclass_fields__
         for field_name, field_def in fields.items():
