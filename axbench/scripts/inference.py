@@ -62,11 +62,11 @@ BENCHMARK_PROMPTS = {
         # ),
         "base": (
             "{question}\n\n"
-            "Therefore, the answer is:"
+            # "Therefore, the answer is:"
         ),
         "steering": (
             "{question}\n\n"
-            "Therefore, the answer is:"
+            # "Therefore, the answer is:"
         ),
         "concept": "Basic Arithmetic Reasoning",
     },
