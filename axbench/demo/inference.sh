@@ -16,36 +16,12 @@ mkdir -p "$(dirname "${OUT_CSV}")"
 echo "benchmark,subset,mode,concept_prompt,steering_factor,accuracy" > "${OUT_CSV}"
 
 ############################################
-# GPU + port management
+# GPU + port management (single GPU)
 ############################################
 
-GPUS=(5 6)
+GPU=5
 BASE_PORT=29502
-gpu_idx=0
 port_offset=0
-
-declare -a PIDS=()
-JOB_INDEX=0
-
-MAX_JOBS=${#GPUS[@]}
-
-wait_for_slot() {
-  while true; do
-    # Clean up finished jobs
-    local new_pids=()
-    for pid in "${PIDS[@]}"; do
-      if kill -0 "$pid" 2>/dev/null; then
-        new_pids+=("$pid")
-      fi
-    done
-    PIDS=("${new_pids[@]}")
-
-    if (( ${#PIDS[@]} < MAX_JOBS )); then
-      return
-    fi
-    sleep 5
-  done
-}
 
 next_port() {
   local port=$((BASE_PORT + port_offset))
@@ -84,9 +60,7 @@ run_task () {
   fi
 
   for mode in "${MODES[@]}"; do
-    wait_for_slot
-    gpu="${GPUS[$((JOB_INDEX % ${#GPUS[@]}))]}"
-    JOB_INDEX=$((JOB_INDEX + 1))
+    gpu="${GPU}"
 
     port="$(next_port)"
 
@@ -135,9 +109,7 @@ run_task () {
           echo "${benchmark},${discipline:-${field}},${MODE_LABEL},${PROMPT_LABEL},${FACTOR},${ACCURACY}" >> "${OUT_CSV}"
         done
 
-    ) &
-
-    PIDS+=($!)
+    )
   done
 }
 
@@ -147,11 +119,6 @@ run_task () {
 
 for task in "${TASKS[@]}"; do
   run_task "${task}"
-done
-
-echo "Waiting for all GPU jobs to complete..."
-for pid in "${PIDS[@]}"; do
-  wait "$pid"
 done
 
 echo "========================================"
