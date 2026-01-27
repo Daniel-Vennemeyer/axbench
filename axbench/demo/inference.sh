@@ -8,7 +8,7 @@ set -uo pipefail
 CONFIG="axbench/demo/sweep/hypersteer_supergpqa.yaml"
 BASE_DUMP_DIR="runs/hypersteer-gemma2b-16000-2"
 OUT_CSV="runs/all_reasoning_accuracies.csv"
-STEERING_FACTORS="0,0.2,0.4,0.6,0.8,1"
+STEERING_FACTORS="0,0.2"
 
 mkdir -p "$(dirname "${OUT_CSV}")"
 
