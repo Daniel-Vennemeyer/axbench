@@ -19,7 +19,7 @@ echo "benchmark,subset,mode,concept_prompt,steering_factor,accuracy" > "${OUT_CS
 # GPU + port management (single GPU)
 ############################################
 
-GPU=5
+GPU=6
 BASE_PORT=29502
 port_offset=0
 
