@@ -478,18 +478,19 @@ class BenchmarkRunner:
                 outputs = self.model.generate(
                     **toks,
                     max_new_tokens=max_new_tokens,
-                    do_sample=(
-                        "gemma-2-2b" in getattr(self.model.config, "name_or_path", "").lower()
-                    ),
-                    temperature=(
-                        0.7 if "gemma-2-2b" in getattr(self.model.config, "name_or_path", "").lower() else 1.0
-                    ),
-                    top_p=(
-                        0.95 if "gemma-2-2b" in getattr(self.model.config, "name_or_path", "").lower() else 1.0
-                    ),
-                    repetition_penalty=(
-                        1.05 if "gemma-2-2b" in getattr(self.model.config, "name_or_path", "").lower() else 1.0
-                    ),
+                    # do_sample=(
+                    #     "gemma-2-2b" in getattr(self.model.config, "name_or_path", "").lower()
+                    # ),
+                    # temperature=(
+                    #     0.7 if "gemma-2-2b" in getattr(self.model.config, "name_or_path", "").lower() else 1.0
+                    # ),
+                    # top_p=(
+                    #     0.95 if "gemma-2-2b" in getattr(self.model.config, "name_or_path", "").lower() else 1.0
+                    # ),
+                    # repetition_penalty=(
+                    #     1.05 if "gemma-2-2b" in getattr(self.model.config, "name_or_path", "").lower() else 1.0
+                    # ),
+                    do_sample=False,
                     eos_token_id=self.tokenizer.eos_token_id,
                     pad_token_id=self.tokenizer.eos_token_id,
                     stopping_criteria=stopping_criteria,
