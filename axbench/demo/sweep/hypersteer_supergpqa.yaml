@@ -1,6 +1,6 @@
 train:
   model_name: "google/gemma-2-2b-it"
-  layer: 20
+  layer: 22
   component: "res"
   seed: 42
   n_epochs: 100
@@ -21,7 +21,7 @@ train:
       train_on_negative: false
       exclude_bos: true
       hypernet_name_or_path: "google/gemma-2-2b-it"
-      num_hidden_layers: 4
+      num_hidden_layers: 20
       hypernet_initialize_from_pretrained: true
 inference:
   mode: benchmark
