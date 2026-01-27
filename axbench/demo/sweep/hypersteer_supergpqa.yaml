@@ -8,7 +8,7 @@ train:
   output_length: 128
   models: 
     HyperSteer:
-      batch_size: 12
+      batch_size: 8
       max_training_examples: 16000
       gradient_accumulation_steps: 1
       n_epochs: 50
