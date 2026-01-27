@@ -61,14 +61,10 @@ BENCHMARK_PROMPTS = {
         #     "Therefore, the answer is:"
         # ),
         "base": (
-            "Question:\n{question}\n\n"
-            "Report give the final answer as the correct option letter (A-J).\n\n"
-            "Response:"
+            "{question}\n\n"
         ),
         "steering": (
-            "Question:\n{question}\n\n"
-            "Report give the final answer as the correct option letter (A-J).\n\n"
-            "Response:"
+            "{question}\n\n"
         ),
         "concept": "Basic Arithmetic Reasoning",
     },
