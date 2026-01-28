@@ -18,6 +18,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 import inspect
 from peft.tuners.lora import LoraConfig
+from datasets import load_dataset
 
 # -----------------------------
 # Parsing helpers
