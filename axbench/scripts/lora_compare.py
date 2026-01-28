@@ -101,6 +101,14 @@ def parse_supergpqa_pred(text):
     m = re.search(r"\b([A-J])\b", text.strip(), re.IGNORECASE)
     return m.group(1).upper() if m else None
 
+def parse_codemmlu_pred(text):
+    """Parse CodeMMLU multiple-choice answer (A-D) from model output."""
+    if text is None:
+        return None
+    # Prefer a standalone letter token near the end.
+    m = re.search(r"\b([A-D])\b", text.strip(), re.IGNORECASE)
+    return m.group(1).upper() if m else None
+
 # -----------------------------
 # Stats
 # -----------------------------
@@ -130,6 +138,14 @@ SUPERGPQA_PROMPT = (
     "Question: {question}\n\n"
     "{options}\n\n"
     "Answer:"
+)
+
+CODEMMLU_PROMPT = (
+    "You are given a programming-related multiple choice question. "
+    "Choose the single best answer option.\n\n"
+    "Question: {question}\n\n"
+    "Choices:\n{choices}\n\n"
+    "Answer (A, B, C, or D):"
 )
 
 # -----------------------------
@@ -249,6 +265,10 @@ def safe_load_dataset(dataset_name, split, dump_dir=None, **kwargs):
 
         raise last_err
 
+# -----------------------------
+# Benchmark runners
+# -----------------------------
+
 @torch.no_grad()
 def run_supergpqa(model, tokenizer, max_questions, batch_size, device, discipline=None, field=None):
     dataset = safe_load_dataset(
@@ -315,6 +335,67 @@ def run_supergpqa(model, tokenizer, max_questions, batch_size, device, disciplin
     ci = binomial_ci_95(correct, total)
     return acc, ci, correct, total
 
+
+# --- CodeMMLU runner ---
+
+@torch.no_grad()
+def run_codemmlu(
+    model,
+    tokenizer,
+    max_questions,
+    batch_size,
+    device,
+    subset="execution_prediction",
+):
+    # CodeMMLU uses HF dataset configs for subsets (e.g. "execution_prediction").
+    dataset = load_dataset("Fsoft-AIC/CodeMMLU", subset, split="test")
+
+    if max_questions is not None:
+        dataset = dataset.select(range(min(max_questions, len(dataset))))
+
+    correct = 0
+    total = 0
+
+    for i in tqdm(range(0, len(dataset), batch_size), desc=f"CodeMMLU[{subset}]"):
+        batch = dataset.select(range(i, min(i + batch_size, len(dataset))))
+        prompts = []
+        for ex in batch:
+            # Choices are always 4 options.
+            choices = "\n".join(
+                f"{chr(ord('A') + j)}. {opt}" for j, opt in enumerate(ex["choices"])
+            )
+            prompts.append(
+                CODEMMLU_PROMPT.format(
+                    question=ex["question"],
+                    choices=choices,
+                )
+            )
+
+        inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(device)
+
+        # Greedy decoding; keep outputs short because we only need the letter.
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=8,
+            do_sample=False,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+
+        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        for ex, out in zip(batch, decoded):
+            pred = parse_codemmlu_pred(out)
+            gold = str(ex.get("answer", "")).strip().upper()
+            # Some datasets store "A"/"B"/"C"/"D" as answer.
+            if pred is not None and gold and pred == gold:
+                correct += 1
+            total += 1
+
+    acc = correct / total if total > 0 else 0.0
+    ci = binomial_ci_95(correct, total)
+    return acc, ci, correct, total
+
 # -----------------------------
 # LoRA evaluation plan
 # -----------------------------
@@ -327,68 +408,73 @@ LORA_EVAL_PLAN = [
     },
     {
         "lora": None,
-        "benchmark": "supergpqa",
-        "discipline": "Medicine",
+        "benchmark": "codemmlu",
+        "codemmlu_subset": "execution_prediction",
     },
-    {
-        "lora": None,
-        "benchmark": "supergpqa",
-        "field": "Physics",
-    },
-    {
-        "lora": None,
-        "benchmark": "supergpqa",
-        "field": "Chemistry",
-    },
-    {
-        "lora": None,
-        "benchmark": "supergpqa",
-        "discipline": "History",
-    },
-    {
-        "lora": None,
-        "benchmark": "supergpqa",
-        "discipline": "Legal",
-    },
-    {
-        "lora": None,
-        "benchmark": "supergpqa",
-        "discipline": "Literature and Arts",
-    },
+    # {
+    #     "lora": None,
+    #     "benchmark": "supergpqa",
+    #     "discipline": "Medicine",
+    # },
+    # {
+    #     "lora": None,
+    #     "benchmark": "supergpqa",
+    #     "field": "Physics",
+    # },
+    # {
+    #     "lora": None,
+    #     "benchmark": "supergpqa",
+    #     "field": "Chemistry",
+    # },
+    # {
+    #     "lora": None,
+    #     "benchmark": "supergpqa",
+    #     "discipline": "History",
+    # },
+    # {
+    #     "lora": None,
+    #     "benchmark": "supergpqa",
+    #     "discipline": "Legal",
+    # },
+    # {
+    #     "lora": None,
+    #     "benchmark": "supergpqa",
+    #     "discipline": "Literature and Arts",
+    # },
     # GSM8K
     {
-        "lora": "marco-molinari/axbench-lora-epoch5-basic_arithmetic_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch60-basic_arithmetic_reasoning",
         "benchmark": "gsm8k",
     },
 
     # SuperGPQA
     {
-        "lora": "marco-molinari/axbench-lora-epoch5-epidemiology_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch60-epidemiology_reasoning",
         "benchmark": "supergpqa",
         "discipline": "Medicine",
     },
     {
-        "lora": "marco-molinari/axbench-lora-epoch5-classical_mechanics_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch60-classical_mechanics_reasoning",
         "benchmark": "supergpqa",
         "field": "Physics",
     },
     {
-        "lora": "marco-molinari/axbench-lora-epoch5-organic_chemistry_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch60-organic_chemistry_reasoning",
         "benchmark": "supergpqa",
         "field": "Chemistry",
     },
     {
-        "lora": "marco-molinari/axbench-lora-epoch5-medieval_european_history_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch60-medieval_european_history_reasoning",
         "benchmark": "supergpqa",
         "discipline": "History",
     },
     {
-        "lora": "marco-molinari/axbench-lora-epoch5-constitutional_law_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch60-constitutional_law_reasoning",
         "benchmark": "supergpqa",
         "discipline": "Legal",
     },
     {
-        "lora": "marco-molinari/axbench-lora-epoch5-narrative_structure_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch60-narrative_structure_reasoning",
         "benchmark": "supergpqa",
         "discipline": "Literature and Arts",
     },
@@ -449,6 +535,7 @@ def main():
     parser.add_argument("--max_questions", type=int, default=None)
     parser.add_argument("--use_bf16", action="store_true")
     parser.add_argument("--out_dir", default="lora_benchmarks")
+    parser.add_argument("--codemmlu_subset", default="execution_prediction")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -472,6 +559,7 @@ def main():
         benchmark = spec["benchmark"]
         discipline = spec.get("discipline")
         field = spec.get("field")
+        codemmlu_subset = spec.get("codemmlu_subset", args.codemmlu_subset)
 
         label = lora_path if lora_path is not None else "BASE_MODEL"
         print(f"\n=== Evaluating: {label} ===")
@@ -494,6 +582,15 @@ def main():
                 args.batch_size,
                 device,
             )
+        elif benchmark == "codemmlu":
+            acc, ci, correct, total = run_codemmlu(
+                model,
+                tokenizer,
+                args.max_questions,
+                args.batch_size,
+                device,
+                subset=codemmlu_subset,
+            )
         else:
             acc, ci, correct, total = run_supergpqa(
                 model,
@@ -510,6 +607,7 @@ def main():
             "benchmark": benchmark,
             "discipline": discipline,
             "field": field,
+            "codemmlu_subset": codemmlu_subset if benchmark == "codemmlu" else None,
             "accuracy": acc,
             "ci_95": {"low": ci[0], "high": ci[1]},
             "correct": correct,
@@ -517,7 +615,10 @@ def main():
         }
 
         name = Path(lora_path).name if lora_path is not None else "BASE_MODEL"
-        with open(out_dir / f"{benchmark}_{name}.json", "w") as f:
+        out_name = f"{benchmark}_{name}.json"
+        if benchmark == "codemmlu":
+            out_name = f"{benchmark}_{codemmlu_subset}_{name}.json"
+        with open(out_dir / out_name, "w") as f:
             json.dump(summary, f, indent=2)
 
         print(summary)
