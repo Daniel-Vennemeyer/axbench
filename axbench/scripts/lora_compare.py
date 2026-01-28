@@ -322,38 +322,38 @@ def run_supergpqa(model, tokenizer, max_questions, batch_size, device, disciplin
 LORA_EVAL_PLAN = [
     # GSM8K
     {
-        "lora": "marco-molinari/axbench-lora-basic_arithmetic_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch5-basic_arithmetic_reasoning",
         "benchmark": "gsm8k",
     },
 
     # SuperGPQA
     {
-        "lora": "marco-molinari/axbench-lora-epidemiology_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch5-epidemiology_reasoning",
         "benchmark": "supergpqa",
         "discipline": "Medicine",
     },
     {
-        "lora": "marco-molinari/axbench-lora-classical_mechanics_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch5-classical_mechanics_reasoning",
         "benchmark": "supergpqa",
         "field": "Physics",
     },
     {
-        "lora": "marco-molinari/axbench-lora-organic_chemistry_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch5-organic_chemistry_reasoning",
         "benchmark": "supergpqa",
         "field": "Chemistry",
     },
     {
-        "lora": "marco-molinari/axbench-lora-medieval_european_history_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch5-medieval_european_history_reasoning",
         "benchmark": "supergpqa",
         "discipline": "History",
     },
     {
-        "lora": "marco-molinari/axbench-lora-constitutional_law_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch5-constitutional_law_reasoning",
         "benchmark": "supergpqa",
         "discipline": "Legal",
     },
     {
-        "lora": "marco-molinari/axbench-lora-narrative_structure_reasoning",
+        "lora": "marco-molinari/axbench-lora-epoch5-narrative_structure_reasoning",
         "benchmark": "supergpqa",
         "discipline": "Literature and Arts",
     },
