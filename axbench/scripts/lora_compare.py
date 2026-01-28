@@ -7,10 +7,11 @@ import json
 import math
 import re
 from pathlib import Path
+import os
 
 import torch
 from peft import PeftModel
-from huggingface_hub import hf_hub_download
+from huggingface_hub import snapshot_download
 from peft import PeftConfig
 import json as _json
 import tempfile
@@ -177,12 +178,27 @@ def run_supergpqa(model, tokenizer, max_questions, batch_size, device, disciplin
     Reads JSONL directly from the Hub to avoid Python 3.12 + datasets crashes.
     """
 
-    # Download raw JSONL
-    jsonl_path = hf_hub_download(
+    repo_dir = snapshot_download(
         repo_id="m-a-p/SuperGPQA",
-        filename="train.jsonl",
         repo_type="dataset",
     )
+
+    candidates = [
+        os.path.join(repo_dir, "train.jsonl"),
+        os.path.join(repo_dir, "data", "train.jsonl"),
+        os.path.join(repo_dir, "data", "train", "train.jsonl"),
+    ]
+
+    jsonl_path = None
+    for p in candidates:
+        if os.path.exists(p):
+            jsonl_path = p
+            break
+
+    if jsonl_path is None:
+        raise FileNotFoundError(
+            f"Could not find train.jsonl in SuperGPQA snapshot. Checked: {candidates}"
+        )
 
     correct = 0
     total = 0
