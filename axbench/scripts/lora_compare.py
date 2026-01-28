@@ -181,7 +181,12 @@ def run_gsm8k(model, tokenizer, max_questions, batch_size, device):
 def safe_load_dataset(dataset_name, split, dump_dir=None, **kwargs):
     """Load an HF dataset with retries that bypass potentially corrupted caches."""
     try:
-        return load_dataset(dataset_name, split=split, **kwargs)
+        return load_dataset(
+            dataset_name,
+            split=split,
+            trust_remote_code=True,
+            **kwargs,
+        )
     except Exception as e:
         msg = str(e)
         known = (
@@ -215,6 +220,7 @@ def safe_load_dataset(dataset_name, split, dump_dir=None, **kwargs):
                 return load_dataset(
                     dataset_name,
                     split=split,
+                    trust_remote_code=True,
                     cache_dir=cache_dir,
                     download_mode=DownloadMode.FORCE_REDOWNLOAD,
                     **kwargs,
@@ -248,7 +254,7 @@ def run_supergpqa(model, tokenizer, max_questions, batch_size, device, disciplin
     dataset = safe_load_dataset(
         "m-a-p/SuperGPQA",
         split="train",
-        dump_dir=None,
+        dump_dir=Path("runs"),
     )
 
     if discipline is not None:
@@ -433,6 +439,10 @@ def main():
         field = spec.get("field")
 
         print(f"\n=== Evaluating LoRA: {lora_path} ===")
+
+        # Clear peft_config to avoid stacking adapters
+        if hasattr(base_model, "peft_config"):
+            base_model.peft_config.clear()
 
         model = load_peft_model_robust(base_model, lora_path)
         model = model.eval()
