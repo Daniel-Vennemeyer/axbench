@@ -153,7 +153,9 @@ def run_gsm8k(model, tokenizer, max_questions, batch_size, device):
         outputs = model.generate(
             **inputs,
             max_new_tokens=256,
-            do_sample=False
+            temperature=0.7,
+            top_p=0.95,
+            do_sample=True
         )
 
         decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
@@ -177,7 +179,11 @@ def run_supergpqa(model, tokenizer, max_questions, batch_size, device, disciplin
         "m-a-p/SuperGPQA",
         split="train",
         streaming=True,
+        trust_remote_code=True,
     )
+    # Defensive: some HF versions still attempt DatasetInfo construction
+    # even in streaming mode. Force iterator materialization early.
+    dataset = iter(dataset)
 
     if discipline is not None:
         want = discipline.strip().lower()
