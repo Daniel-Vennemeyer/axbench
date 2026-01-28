@@ -8,10 +8,13 @@ import math
 import re
 from pathlib import Path
 import os
+import time
+import shutil
+import logging
+from datasets import DownloadMode
 
 import torch
 from peft import PeftModel
-from huggingface_hub import snapshot_download, hf_hub_download
 from peft import PeftConfig
 import json as _json
 import tempfile
@@ -20,6 +23,9 @@ from tqdm import tqdm
 import inspect
 from peft.tuners.lora import LoraConfig
 from datasets import load_dataset
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 # -----------------------------
 # Parsing helpers
@@ -171,100 +177,132 @@ def run_gsm8k(model, tokenizer, max_questions, batch_size, device):
     ci = binomial_ci_95(correct, total)
     return acc, ci, correct, total
 
+def safe_load_dataset(dataset_name, split, dump_dir=None, **kwargs):
+    """Load an HF dataset with retries that bypass potentially corrupted caches."""
+    try:
+        return load_dataset(dataset_name, split=split, **kwargs)
+    except Exception as e:
+        msg = str(e)
+        known = (
+            "must be called with a dataclass type" in msg
+            or "DatasetInfo.from_directory" in msg
+            or "Features.from_dict" in msg
+        )
+        if not known:
+            raise
+
+        base_cache_dir = None
+        if dump_dir is not None:
+            base_cache_dir = Path(dump_dir) / "hf_datasets_cache"
+            base_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.warning(
+            f"[Warn] load_dataset('{dataset_name}', split='{split}') failed with a cache/features error; "
+            f"retrying with force redownload and an isolated cache_dir under {str(base_cache_dir) if base_cache_dir else None!r}. "
+            f"Original error: {msg}"
+        )
+
+        last_err = e
+        for attempt in range(3):
+            cache_dir = None
+            if base_cache_dir is not None:
+                unique = f"{dataset_name.replace('/', '___').replace(' ', '_')}_pid{os.getpid()}_{int(time.time()*1000)}_try{attempt}"
+                cache_dir = str(base_cache_dir / unique)
+                Path(cache_dir).mkdir(parents=True, exist_ok=True)
+
+            try:
+                return load_dataset(
+                    dataset_name,
+                    split=split,
+                    cache_dir=cache_dir,
+                    download_mode=DownloadMode.FORCE_REDOWNLOAD,
+                    **kwargs,
+                )
+            except OSError as oe:
+                if getattr(oe, "errno", None) == 39:
+                    oe_msg = str(oe)
+                    logger.warning(
+                        f"[Warn] load_dataset retry hit an incomplete_dir cleanup race (Errno 39). "
+                        f"Will best-effort delete the offending directory and retry. Error: {oe_msg}"
+                    )
+                    m = re.search(r"'([^']+)'\s*$", oe_msg)
+                    if m:
+                        bad_dir = m.group(1)
+                        try:
+                            shutil.rmtree(bad_dir, ignore_errors=True)
+                        except Exception:
+                            pass
+                    last_err = oe
+                    continue
+                last_err = oe
+                continue
+            except Exception as e2:
+                last_err = e2
+                continue
+
+        raise last_err
+
 @torch.no_grad()
 def run_supergpqa(model, tokenizer, max_questions, batch_size, device, discipline=None, field=None):
-    """
-    SuperGPQA loader that bypasses HuggingFace Datasets entirely.
-    Reads JSONL directly from the Hub to avoid Python 3.12 + datasets crashes.
-    """
-
-    repo_dir = snapshot_download(
-        repo_id="m-a-p/SuperGPQA",
-        repo_type="dataset",
+    dataset = safe_load_dataset(
+        "m-a-p/SuperGPQA",
+        split="train",
+        dump_dir=None,
     )
 
-    candidates = [
-        os.path.join(repo_dir, "train.jsonl"),
-        os.path.join(repo_dir, "data", "train.jsonl"),
-        os.path.join(repo_dir, "data", "train", "train.jsonl"),
-    ]
-
-    jsonl_path = None
-    for p in candidates:
-        if os.path.exists(p):
-            jsonl_path = p
-            break
-
-    if jsonl_path is None:
-        raise FileNotFoundError(
-            f"Could not find train.jsonl in SuperGPQA snapshot. Checked: {candidates}"
+    if discipline is not None:
+        want = discipline.strip().lower()
+        dataset = dataset.filter(
+            lambda ex: str(ex.get("discipline", "")).strip().lower() == want
         )
+
+    if field is not None:
+        want = field.strip().lower()
+        dataset = dataset.filter(
+            lambda ex: str(ex.get("field", "")).strip().lower() == want
+        )
+
+    if max_questions is not None:
+        dataset = dataset.select(range(min(max_questions, len(dataset))))
 
     correct = 0
     total = 0
-    batch = []
 
-    with open(jsonl_path, "r") as f:
-        for line in tqdm(f, desc="SuperGPQA"):
-            ex = json.loads(line)
+    for i in tqdm(range(0, len(dataset), batch_size), desc="SuperGPQA"):
+        batch = dataset.select(range(i, min(i + batch_size, len(dataset))))
+        prompts = []
 
-            # Discipline / field filtering
-            if discipline is not None:
-                if str(ex.get("discipline", "")).strip().lower() != discipline.strip().lower():
-                    continue
-
-            if field is not None:
-                if str(ex.get("field", "")).strip().lower() != field.strip().lower():
-                    continue
-
-            batch.append(ex)
-            if max_questions is not None and total + len(batch) >= max_questions:
-                batch = batch[: max_questions - total]
-
-            if len(batch) < batch_size:
-                if max_questions is not None and total + len(batch) >= max_questions:
-                    pass
-                else:
-                    continue
-
-            # Process batch
-            prompts = []
-            for ex in batch:
-                options = "\n".join(
-                    f"{chr(ord('A') + j)}. {opt}"
-                    for j, opt in enumerate(ex["options"])
+        for ex in batch:
+            options = "\n".join(
+                f"{chr(ord('A') + j)}. {opt}"
+                for j, opt in enumerate(ex["options"])
+            )
+            prompts.append(
+                SUPERGPQA_PROMPT.format(
+                    question=ex["question"],
+                    options=options
                 )
-                prompts.append(
-                    SUPERGPQA_PROMPT.format(
-                        question=ex["question"],
-                        options=options
-                    )
-                )
-
-            inputs = tokenizer(
-                prompts,
-                return_tensors="pt",
-                padding=True
-            ).to(device)
-
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=64,
-                do_sample=False
             )
 
-            decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True
+        ).to(device)
 
-            for ex, out in zip(batch, decoded):
-                pred = parse_supergpqa_pred(out)
-                if pred == ex["answer_letter"]:
-                    correct += 1
-                total += 1
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=64,
+            do_sample=False
+        )
 
-            batch.clear()
+        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
-            if max_questions is not None and total >= max_questions:
-                break
+        for ex, out in zip(batch, decoded):
+            pred = parse_supergpqa_pred(out)
+            if pred == ex["answer_letter"]:
+                correct += 1
+            total += 1
 
     acc = correct / total if total > 0 else 0.0
     ci = binomial_ci_95(correct, total)
