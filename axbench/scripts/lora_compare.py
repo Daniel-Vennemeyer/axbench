@@ -91,7 +91,7 @@ def run_gsm8k(model, tokenizer, max_questions, batch_size, device):
     total = 0
 
     for i in tqdm(range(0, len(dataset), batch_size), desc="GSM8K"):
-        batch = dataset[i:i + batch_size]
+        batch = dataset.select(range(i, min(i + batch_size, len(dataset))))
         prompts = [
             GSM8K_PROMPT.format(question=ex["question"])
             for ex in batch
@@ -144,12 +144,12 @@ def run_supergpqa(model, tokenizer, max_questions, batch_size, device, disciplin
     total = 0
 
     for i in tqdm(range(0, len(dataset), batch_size), desc="SuperGPQA"):
-        batch = dataset[i:i + batch_size]
+        batch = dataset.select(range(i, min(i + batch_size, len(dataset))))
         prompts = []
         for ex in batch:
             options = "\n".join(
-                f"{chr(ord('A') + i)}. {opt}"
-                for i, opt in enumerate(ex["options"])
+                f"{chr(ord('A') + j)}. {opt}"
+                for j, opt in enumerate(ex["options"])
             )
             prompts.append(
                 SUPERGPQA_PROMPT.format(
