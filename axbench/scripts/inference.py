@@ -1015,7 +1015,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         ]
         base_concept = getattr(args, "concept_prompt", None)
         if base_concept is None or str(base_concept).strip() == "":
-            base_concept = "Computer Science Reasoning"
+            base_concept = "Data Structures Reasoning"
         base_concept = str(base_concept)
         input_concepts = [base_concept for _ in prompts]
 
