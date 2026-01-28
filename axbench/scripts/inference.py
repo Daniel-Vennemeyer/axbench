@@ -719,7 +719,7 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
         dataset = dataset.shard(num_shards=world_size, index=rank)
         dataset_list = list(dataset)
     elif args.benchmark == "codemmlu":
-        dataset = load_dataset("Fsoft-AIC/CodeMMLU", "execution_prediction")
+        dataset = load_dataset("Fsoft-AIC/CodeMMLU", "software_principles")
         if getattr(args, "max_questions", None) is not None:
             dataset = dataset.select(range(min(len(dataset), args.max_questions)))
         # shard dataset across ranks
