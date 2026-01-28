@@ -11,6 +11,10 @@ from pathlib import Path
 import torch
 from datasets import load_dataset
 from peft import PeftModel
+from huggingface_hub import hf_hub_download
+from peft import PeftConfig
+import json as _json
+import tempfile
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
@@ -221,6 +225,51 @@ LORA_EVAL_PLAN = [
 ]
 
 # -----------------------------
+# Helper to robustly load LoRA
+# -----------------------------
+
+def load_peft_model_robust(base_model, lora_repo):
+    """
+    Load a PEFT / LoRA adapter, stripping unknown config fields
+    (e.g. `corda_config`) for older peft versions.
+    """
+    try:
+        return PeftModel.from_pretrained(base_model, lora_repo)
+    except TypeError as e:
+        if "unexpected keyword argument" not in str(e):
+            raise
+
+        # Download and sanitize adapter_config.json
+        cfg_path = hf_hub_download(lora_repo, "adapter_config.json")
+        with open(cfg_path, "r") as f:
+            cfg = _json.load(f)
+
+        # Drop fields not supported by older peft
+        unsupported_keys = [
+            "corda_config",
+            "eva_config",
+            "adalora_config",
+            "loha_config",
+            "lokr_config",
+        ]
+        for k in unsupported_keys:
+            cfg.pop(k, None)
+
+        # Write sanitized config to a temp dir
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clean_cfg_path = Path(tmpdir) / "adapter_config.json"
+            with open(clean_cfg_path, "w") as f:
+                _json.dump(cfg, f)
+
+            # Load using explicit config
+            peft_cfg = PeftConfig.from_pretrained(tmpdir)
+            return PeftModel.from_pretrained(
+                base_model,
+                lora_repo,
+                config=peft_cfg,
+            )
+
+# -----------------------------
 # Main
 # -----------------------------
 
@@ -258,7 +307,7 @@ def main():
 
         print(f"\n=== Evaluating LoRA: {lora_path} ===")
 
-        model = PeftModel.from_pretrained(base_model, lora_path)
+        model = load_peft_model_robust(base_model, lora_path)
         model = model.eval()
 
         if benchmark == "gsm8k":
