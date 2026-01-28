@@ -9,7 +9,6 @@ import re
 from pathlib import Path
 
 import torch
-from datasets import load_dataset
 from peft import PeftModel
 from huggingface_hub import hf_hub_download
 from peft import PeftConfig
@@ -19,7 +18,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 import inspect
 from peft.tuners.lora import LoraConfig
-import itertools
 
 # -----------------------------
 # Parsing helpers
@@ -173,116 +171,85 @@ def run_gsm8k(model, tokenizer, max_questions, batch_size, device):
 
 @torch.no_grad()
 def run_supergpqa(model, tokenizer, max_questions, batch_size, device, discipline=None, field=None):
-    # NOTE: SuperGPQA is loaded in streaming mode to avoid
-    # Python 3.12 + HF datasets Feature/dataclass reconstruction bugs.
-    dataset = load_dataset(
-        "m-a-p/SuperGPQA",
-        split="train",
-        streaming=True,
-        trust_remote_code=True,
+    """
+    SuperGPQA loader that bypasses HuggingFace Datasets entirely.
+    Reads JSONL directly from the Hub to avoid Python 3.12 + datasets crashes.
+    """
+
+    # Download raw JSONL
+    jsonl_path = hf_hub_download(
+        repo_id="m-a-p/SuperGPQA",
+        filename="train.jsonl",
+        repo_type="dataset",
     )
-    # Defensive: some HF versions still attempt DatasetInfo construction
-    # even in streaming mode. Force iterator materialization early.
-    dataset = iter(dataset)
-
-    if discipline is not None:
-        want = discipline.strip().lower()
-        dataset = (
-            ex for ex in dataset
-            if str(ex.get("discipline", "")).strip().lower() == want
-        )
-
-    if field is not None:
-        want = field.strip().lower()
-        dataset = (
-            ex for ex in dataset
-            if str(ex.get("field", "")).strip().lower() == want
-        )
-
-    if max_questions is not None:
-        dataset = itertools.islice(dataset, max_questions)
 
     correct = 0
     total = 0
-
     batch = []
-    for ex in tqdm(dataset, desc="SuperGPQA"):
-        batch.append(ex)
-        if len(batch) < batch_size:
-            continue
 
-        # Process batch
-        prompts = []
-        for ex in batch:
-            options = "\n".join(
-                f"{chr(ord('A') + j)}. {opt}"
-                for j, opt in enumerate(ex["options"])
-            )
-            prompts.append(
-                SUPERGPQA_PROMPT.format(
-                    question=ex["question"],
-                    options=options
+    with open(jsonl_path, "r") as f:
+        for line in tqdm(f, desc="SuperGPQA"):
+            ex = json.loads(line)
+
+            # Discipline / field filtering
+            if discipline is not None:
+                if str(ex.get("discipline", "")).strip().lower() != discipline.strip().lower():
+                    continue
+
+            if field is not None:
+                if str(ex.get("field", "")).strip().lower() != field.strip().lower():
+                    continue
+
+            batch.append(ex)
+            if max_questions is not None and total + len(batch) >= max_questions:
+                batch = batch[: max_questions - total]
+
+            if len(batch) < batch_size:
+                if max_questions is not None and total + len(batch) >= max_questions:
+                    pass
+                else:
+                    continue
+
+            # Process batch
+            prompts = []
+            for ex in batch:
+                options = "\n".join(
+                    f"{chr(ord('A') + j)}. {opt}"
+                    for j, opt in enumerate(ex["options"])
                 )
-            )
-
-        inputs = tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True
-        ).to(device)
-
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=64,
-            do_sample=False
-        )
-
-        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-
-        for ex, out in zip(batch, decoded):
-            pred = parse_supergpqa_pred(out)
-            if pred == ex["answer_letter"]:
-                correct += 1
-            total += 1
-
-        batch.clear()
-
-    if batch:
-        # process final partial batch
-        prompts = []
-        for ex in batch:
-            options = "\n".join(
-                f"{chr(ord('A') + j)}. {opt}"
-                for j, opt in enumerate(ex["options"])
-            )
-            prompts.append(
-                SUPERGPQA_PROMPT.format(
-                    question=ex["question"],
-                    options=options
+                prompts.append(
+                    SUPERGPQA_PROMPT.format(
+                        question=ex["question"],
+                        options=options
+                    )
                 )
+
+            inputs = tokenizer(
+                prompts,
+                return_tensors="pt",
+                padding=True
+            ).to(device)
+
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=64,
+                do_sample=False
             )
 
-        inputs = tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True
-        ).to(device)
+            decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=64,
-            do_sample=False
-        )
+            for ex, out in zip(batch, decoded):
+                pred = parse_supergpqa_pred(out)
+                if pred == ex["answer_letter"]:
+                    correct += 1
+                total += 1
 
-        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            batch.clear()
 
-        for ex, out in zip(batch, decoded):
-            pred = parse_supergpqa_pred(out)
-            if pred == ex["answer_letter"]:
-                correct += 1
-            total += 1
+            if max_questions is not None and total >= max_questions:
+                break
 
-    acc = correct / total
+    acc = correct / total if total > 0 else 0.0
     ci = binomial_ci_95(correct, total)
     return acc, ci, correct, total
 
