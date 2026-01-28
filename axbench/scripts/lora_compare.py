@@ -19,6 +19,7 @@ from peft import PeftConfig
 import json as _json
 import tempfile
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from huggingface_hub import hf_hub_download
 from tqdm import tqdm
 import inspect
 from peft.tuners.lora import LoraConfig
