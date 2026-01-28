@@ -104,6 +104,7 @@ BENCHMARK_PROMPTS = {
             "Report the final answer as the correct option letter.\n\n"
             "Response:"
         ),
+        "concept": "Computer Science Reasoning",
     },
 }
 
@@ -973,7 +974,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
             prompt_cfg["base"].format(question=ex["question"])
             for ex in dataset_list
         ]
-        input_concepts = ["Basic Arithmetic Reasoning"] * len(prompts)
+        input_concepts = [str("Basic Arithmetic Reasoning")] * len(prompts)
     elif args.benchmark == "supergpqa":
         prompts = [
             prompt_cfg["base"].format(
@@ -986,12 +987,18 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         input_concepts = []
         for ex in dataset_list:
             if getattr(args, "supergpqa_auto_concept", False):
-                input_concept = f"{ex['subfield']} Reasoning"
-            elif getattr(args, "concept_prompt", None):
-                input_concept = args.concept_prompt
+                subfield = ex.get("subfield")
+                if subfield is None or str(subfield).strip() == "":
+                    input_concept = "Epidemiology Reasoning"
+                else:
+                    input_concept = f"{str(subfield)} Reasoning"
             else:
-                input_concept = "Epidemiology Reasoning"
-            input_concepts.append(input_concept)
+                cp = getattr(args, "concept_prompt", None)
+                if cp is None or str(cp).strip() == "":
+                    input_concept = "Epidemiology Reasoning"
+                else:
+                    input_concept = str(cp)
+            input_concepts.append(str(input_concept))
         # Logging: state that supergpqa_auto_concept is being resolved per-example
         unique_concepts = list({c for c in input_concepts})
         logger.warning(
@@ -1006,10 +1013,19 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
             )
             for ex in dataset_list
         ]
-        input_concepts = [
-            getattr(args, "concept_prompt", "Code Reasoning")
-            for _ in prompts
-        ]
+        base_concept = getattr(args, "concept_prompt", None)
+        if base_concept is None or str(base_concept).strip() == "":
+            base_concept = "Computer Science Reasoning"
+        base_concept = str(base_concept)
+        input_concepts = [base_concept for _ in prompts]
+
+    # Defensive: HyperSteer concept tokenizer requires strings
+    bad = [c for c in input_concepts if not isinstance(c, str)]
+    if bad:
+        raise ValueError(
+            f"Non-string concept prompts detected (n={len(bad)}). "
+            f"Example type={type(bad[0])}, value={bad[0]!r}."
+        )
 
     # ---- Parse steering factors ----
     if getattr(args, "steering_factors", None) is None:
