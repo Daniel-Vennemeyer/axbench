@@ -11,7 +11,7 @@ import os
 
 import torch
 from peft import PeftModel
-from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download, hf_hub_download
 from peft import PeftConfig
 import json as _json
 import tempfile
