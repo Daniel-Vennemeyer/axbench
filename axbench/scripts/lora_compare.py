@@ -17,6 +17,8 @@ import json as _json
 import tempfile
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
+import inspect
+from peft.tuners.lora import LoraConfig
 
 # -----------------------------
 # Parsing helpers
@@ -244,22 +246,20 @@ def load_peft_model_robust(base_model, lora_repo):
         with open(cfg_path, "r") as f:
             cfg = _json.load(f)
 
-        # Drop fields not supported by older peft
-        unsupported_keys = [
-            "corda_config",
-            "eva_config",
-            "adalora_config",
-            "loha_config",
-            "lokr_config",
-        ]
-        for k in unsupported_keys:
-            cfg.pop(k, None)
+        # Drop any keys not accepted by this PEFT version's LoraConfig
+        valid_keys = set(inspect.signature(LoraConfig.__init__).parameters.keys())
+        valid_keys.discard("self")
+
+        cfg = {k: v for k, v in cfg.items() if k in valid_keys}
 
         # Write sanitized config to a temp dir
         with tempfile.TemporaryDirectory() as tmpdir:
             clean_cfg_path = Path(tmpdir) / "adapter_config.json"
             with open(clean_cfg_path, "w") as f:
                 _json.dump(cfg, f)
+
+            # The sanitized adapter_config.json now only contains keys
+            # supported by the local PEFT version.
 
             # Load using explicit config
             peft_cfg = PeftConfig.from_pretrained(tmpdir)
