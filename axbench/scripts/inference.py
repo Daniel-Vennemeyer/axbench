@@ -717,6 +717,13 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
         # shard dataset across ranks
         dataset = dataset.shard(num_shards=world_size, index=rank)
         dataset_list = list(dataset)
+    elif args.benchmark == "codemmlu":
+        dataset = load_dataset("Fsoft-AIC/CodeMMLU", "execution_prediction", split="test")
+        if getattr(args, "max_questions", None) is not None:
+            dataset = dataset.select(range(min(len(dataset), args.max_questions)))
+        # shard dataset across ranks
+        dataset = dataset.shard(num_shards=world_size, index=rank)
+        dataset_list = list(dataset)
     else:
         raise ValueError(f"Unsupported benchmark: {args.benchmark}")
 
@@ -761,6 +768,14 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
             )
             for ex in dataset_list
         ]
+    elif args.benchmark == "codemmlu":
+        prompts = [
+            template.format(
+                question=ex["question"],
+                options="\n".join([f"{chr(ord('A')+i)}. {opt}" for i, opt in enumerate(ex["choices"])])
+            )
+            for ex in dataset_list
+        ]
     # For SuperGPQA, set concept_prompt using helper
     if args.benchmark == "supergpqa":
         args.concept_prompt = resolve_supergpqa_concept(args, dataset_list)
@@ -793,6 +808,10 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
             gold = ex["answer_letter"]
             pred = parse_supergpqa_pred(resp)
             is_correct = (pred == gold) and (gold is not None) and (pred is not None)
+        elif args.benchmark == "codemmlu":
+            gold = ex["answer"]
+            pred = parse_codemmlu_pred(resp)
+            is_correct = (pred == gold) and (gold is not None) and (pred is not None)
         correct += int(is_correct)
         total += 1
 
@@ -809,6 +828,10 @@ def infer_benchmark(args, rank, world_size, device, logger, training_args):
             rec["answer_letter"] = ex["answer_letter"]
             rec["discipline"] = ex["discipline"]
             rec["field"] = ex["field"]
+        if args.benchmark == "codemmlu":
+            rec["choices"] = ex["choices"]
+            rec["answer"] = ex["answer"]
+            rec["task_id"] = ex.get("task_id")
         records.append(rec)
 
         if total > 0:
@@ -889,7 +912,9 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         logger.warning(f"[Benchmark:SUPERGPQA] Loaded {len(dataset)} examples after filtering (before max_questions).")
         dataset_list = list(dataset)
     elif args.benchmark == "codemmlu":
-        dataset = load_dataset("Fsoft-AIC/CodeMMLU", split="test", subset="execution_prediction")
+        # CodeMMLU uses HF "config" names for subsets; "execution_prediction" is a config, not a split.
+        # The correct signature is load_dataset(path, name, split=...).
+        dataset = load_dataset("Fsoft-AIC/CodeMMLU", "execution_prediction", split="test")
         if getattr(args, "max_questions", None) is not None:
             dataset = dataset.select(range(min(len(dataset), args.max_questions)))
         dataset_list = list(dataset)
@@ -2304,7 +2329,7 @@ def main():
             'kwargs': {
                 'type': str,
                 'default': "gsm8k",
-                'help': 'Benchmark name (gsm8k, supergpqa)'
+                'help': 'Benchmark name (gsm8k, supergpqa, codemmlu)'
             }
         },
         {
