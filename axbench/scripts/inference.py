@@ -81,7 +81,7 @@ BENCHMARK_PROMPTS = {
         #     "Please reason step by step. When you are done, give the final answer as the correct option letter (A-J).\n\n"
         #     "Therefore, the answer is:"
         # ),
-                "base": (
+        "base": (
             "Question:\n{question}\n\nOptions:\n{options}\n\n"
             "Report the final answer as the correct option letter (A-J).\n\n"
             "Response:"
@@ -92,6 +92,18 @@ BENCHMARK_PROMPTS = {
             "Response:"
         ),
         # concept intentionally omitted; handled by resolve_supergpqa_concept
+    },
+    "codemmlu": {
+        "base": (
+            "Question:\n{question}\n\nChoices:\n{options}\n\n"
+            "Report the final answer as the correct option letter.\n\n"
+            "Response:"
+        ),
+        "steering": (
+            "Question:\n{question}\n\nChoices:\n{options}\n\n"
+            "Report the final answer as the correct option letter.\n\n"
+            "Response:"
+        ),
     },
 }
 
@@ -523,6 +535,13 @@ def parse_supergpqa_pred(text):
     m = re.search(r"\b([A-J])\b", text.strip(), re.IGNORECASE)
     return m.group(1).upper() if m else None
 
+# --- CodeMMLU prediction parser ---
+def parse_codemmlu_pred(text):
+    if text is None:
+        return None
+    m = re.search(r"\b([A-D])\b", text.strip(), re.IGNORECASE)
+    return m.group(1).upper() if m else None
+
 # --- Helper: Binomial 95% Wilson confidence interval ---
 def binomial_ci_95(correct, total):
     """
@@ -869,6 +888,11 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
 
         logger.warning(f"[Benchmark:SUPERGPQA] Loaded {len(dataset)} examples after filtering (before max_questions).")
         dataset_list = list(dataset)
+    elif args.benchmark == "codemmlu":
+        dataset = load_dataset("Fsoft-AIC/CodeMMLU", split="test", subset="execution_prediction")
+        if getattr(args, "max_questions", None) is not None:
+            dataset = dataset.select(range(min(len(dataset), args.max_questions)))
+        dataset_list = list(dataset)
     else:
         raise ValueError(f"Unsupported benchmark: {args.benchmark}")
 
@@ -949,6 +973,18 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
             f"[Benchmark+Steering] Resolving supergpqa_auto_concept per-example. "
             f"First 3 unique concepts: {unique_concepts[:3]}"
         )
+    elif args.benchmark == "codemmlu":
+        prompts = [
+            prompt_cfg["base"].format(
+                question=ex["question"],
+                options="\n".join([f"{chr(ord('A')+i)}. {opt}" for i, opt in enumerate(ex["choices"])])
+            )
+            for ex in dataset_list
+        ]
+        input_concepts = [
+            getattr(args, "concept_prompt", "Code Reasoning")
+            for _ in prompts
+        ]
 
     # ---- Parse steering factors ----
     if getattr(args, "steering_factors", None) is None:
@@ -1053,6 +1089,10 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
                 gold = ex["answer_letter"]
                 pred = parse_supergpqa_pred(out)
                 ok = (gold is not None) and (pred == gold)
+            elif args.benchmark == "codemmlu":
+                gold = ex["answer"]
+                pred = parse_codemmlu_pred(out)
+                ok = (gold is not None) and (pred == gold)
             correct += int(ok)
             total += 1
             rec = {
@@ -1069,6 +1109,10 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
                 rec["answer_letter"] = ex["answer_letter"]
                 rec["discipline"] = ex["discipline"]
                 rec["field"] = ex["field"]
+            if args.benchmark == "codemmlu":
+                rec["choices"] = ex["choices"]
+                rec["answer"] = ex["answer"]
+                rec["task_id"] = ex.get("task_id")
             records.append(rec)
 
         acc = correct / max(1, total)
@@ -1096,6 +1140,7 @@ def infer_benchmark_steered(args, rank, world_size, device, logger, training_arg
         if args.benchmark == "supergpqa":
             summary["discipline"] = getattr(args, "supergpqa_discipline", None)
             summary["field"] = getattr(args, "supergpqa_field", None)
+        # For codemmlu, no extra fields required; just write summary.
         with open(out_dir / f"{args.benchmark}_summary_factor_{factor}.json", "w") as f:
             json.dump(summary, f, indent=2)
 
