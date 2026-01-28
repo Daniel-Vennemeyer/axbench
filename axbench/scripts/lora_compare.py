@@ -31,14 +31,61 @@ def parse_gsm8k_gold(answer):
     return int(nums[-1]) if nums else None
 
 def parse_gsm8k_pred(text):
+    """
+    Parse the predicted GSM8K answer robustly.
+
+    Priority order:
+      1) If the model outputs a GSM8K-style marker, prefer the integer after '####'.
+      2) If the text contains an '=', take the substring after the last '=' and extract the first integer (allow $/paren/comma/punct).
+      3) Scan lines bottom-up and return the first line that is a *pure integer*.
+      4) Fallback: return the last "answer-like" integer near the end of the text,
+         avoiding common pitfalls:
+           - decimals (e.g. 0.67 should not yield 67)
+           - digits glued to letters (e.g. mwm654)
+           - intermediate fractions (e.g. 3/60)
+         while allowing trailing punctuation like '$460.'.
+    """
     if text is None:
         return None
-    text = text.replace(",", "")
-    if "####" in text:
-        m = re.search(r"-?\d+", text.split("####")[-1])
-        return int(m.group(0)) if m else None
-    tokens = re.findall(r"(?<!\d)-?\d+(?!\d)", text)
-    return int(tokens[-1]) if tokens else None
+
+    clean = text.replace(",", "")
+    # 1) GSM8K marker
+    if "####" in clean:
+        tail = clean.split("####")[-1]
+        m = re.search(r"-?\d+", tail)
+        if m:
+            try:
+                return int(m.group(0))
+            except Exception:
+                pass
+
+    # 2) Highest-priority: after last '=' extract first integer (allow $/paren/commas/trailing punct)
+    if "=" in clean:
+        tail = clean.split("=")[-1]
+        # Remove leading/trailing whitespace and possible currency/paren
+        tail = tail.strip()
+        # Look for $ or ( or whitespace, then integer, possibly with trailing . or )
+        # e.g. = $460. or = (460)
+        m = re.search(r"[\$\(\s]*(-?\d+)", tail)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                pass
+
+    # 3) Integer-only line (canonical)
+    lines = clean.splitlines()
+    for line in reversed(lines):
+        s = line.strip()
+        if re.fullmatch(r"-?\d+", s):
+            return int(s)
+
+    # 4) Fallback: scan integer tokens with context-aware filtering
+    # Token pattern: optional sign + digits, bounded so it's not glued to letters/digits.
+    # Allow trailing punctuation (.,;:!?) and currency symbols around it.
+    token_iter = list(re.finditer(r"(?<![A-Za-z0-9])(-?\d+)(?![A-Za-z0-9])", clean))
+    if not token_iter:
+        return None
 
 def parse_supergpqa_pred(text):
     if text is None:
@@ -123,7 +170,14 @@ def run_gsm8k(model, tokenizer, max_questions, batch_size, device):
 
 @torch.no_grad()
 def run_supergpqa(model, tokenizer, max_questions, batch_size, device, discipline=None, field=None):
-    dataset = load_dataset("m-a-p/SuperGPQA", split="train")
+    # NOTE: SuperGPQA requires trust_remote_code + force_redownload
+    # on some HF / Python 3.12 combinations due to cached feature metadata issues.
+    dataset = load_dataset(
+        "m-a-p/SuperGPQA",
+        split="train",
+        trust_remote_code=True,
+        download_mode="force_redownload",
+    )
 
     if discipline is not None:
         want = discipline.strip().lower()
