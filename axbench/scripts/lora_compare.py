@@ -19,6 +19,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 import inspect
 from peft.tuners.lora import LoraConfig
+import itertools
 
 # -----------------------------
 # Parsing helpers
@@ -170,35 +171,78 @@ def run_gsm8k(model, tokenizer, max_questions, batch_size, device):
 
 @torch.no_grad()
 def run_supergpqa(model, tokenizer, max_questions, batch_size, device, discipline=None, field=None):
-    # NOTE: SuperGPQA requires trust_remote_code + force_redownload
-    # on some HF / Python 3.12 combinations due to cached feature metadata issues.
+    # NOTE: SuperGPQA is loaded in streaming mode to avoid
+    # Python 3.12 + HF datasets Feature/dataclass reconstruction bugs.
     dataset = load_dataset(
         "m-a-p/SuperGPQA",
         split="train",
-        trust_remote_code=True,
-        download_mode="force_redownload",
+        streaming=True,
     )
 
     if discipline is not None:
         want = discipline.strip().lower()
-        dataset = dataset.filter(
-            lambda ex: str(ex.get("discipline", "")).strip().lower() == want
+        dataset = (
+            ex for ex in dataset
+            if str(ex.get("discipline", "")).strip().lower() == want
         )
 
     if field is not None:
         want = field.strip().lower()
-        dataset = dataset.filter(
-            lambda ex: str(ex.get("field", "")).strip().lower() == want
+        dataset = (
+            ex for ex in dataset
+            if str(ex.get("field", "")).strip().lower() == want
         )
 
-    if max_questions:
-        dataset = dataset.select(range(max_questions))
+    if max_questions is not None:
+        dataset = itertools.islice(dataset, max_questions)
 
     correct = 0
     total = 0
 
-    for i in tqdm(range(0, len(dataset), batch_size), desc="SuperGPQA"):
-        batch = dataset.select(range(i, min(i + batch_size, len(dataset))))
+    batch = []
+    for ex in tqdm(dataset, desc="SuperGPQA"):
+        batch.append(ex)
+        if len(batch) < batch_size:
+            continue
+
+        # Process batch
+        prompts = []
+        for ex in batch:
+            options = "\n".join(
+                f"{chr(ord('A') + j)}. {opt}"
+                for j, opt in enumerate(ex["options"])
+            )
+            prompts.append(
+                SUPERGPQA_PROMPT.format(
+                    question=ex["question"],
+                    options=options
+                )
+            )
+
+        inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True
+        ).to(device)
+
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=64,
+            do_sample=False
+        )
+
+        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        for ex, out in zip(batch, decoded):
+            pred = parse_supergpqa_pred(out)
+            if pred == ex["answer_letter"]:
+                correct += 1
+            total += 1
+
+        batch.clear()
+
+    if batch:
+        # process final partial batch
         prompts = []
         for ex in batch:
             options = "\n".join(
