@@ -1,0 +1,301 @@
+# ==============================
+# Minimal LoRA benchmarking script
+# ==============================
+
+import argparse
+import json
+import math
+import re
+from pathlib import Path
+
+import torch
+from datasets import load_dataset
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from tqdm import tqdm
+
+# -----------------------------
+# Parsing helpers
+# -----------------------------
+
+def parse_gsm8k_gold(answer):
+    if "####" in answer:
+        answer = answer.split("####")[-1]
+    nums = re.findall(r"-?\d+", answer.replace(",", ""))
+    return int(nums[-1]) if nums else None
+
+def parse_gsm8k_pred(text):
+    if text is None:
+        return None
+    text = text.replace(",", "")
+    if "####" in text:
+        m = re.search(r"-?\d+", text.split("####")[-1])
+        return int(m.group(0)) if m else None
+    tokens = re.findall(r"(?<!\d)-?\d+(?!\d)", text)
+    return int(tokens[-1]) if tokens else None
+
+def parse_supergpqa_pred(text):
+    if text is None:
+        return None
+    m = re.search(r"\b([A-J])\b", text.strip(), re.IGNORECASE)
+    return m.group(1).upper() if m else None
+
+# -----------------------------
+# Stats
+# -----------------------------
+
+def binomial_ci_95(correct, total):
+    if total == 0:
+        return 0.0, 0.0
+    z = 1.96
+    p = correct / total
+    denom = 1 + z**2 / total
+    center = (p + z**2 / (2 * total)) / denom
+    margin = z * math.sqrt((p * (1 - p) + z**2 / (4 * total)) / total) / denom
+    return max(0.0, center - margin), min(1.0, center + margin)
+
+# -----------------------------
+# Prompts
+# -----------------------------
+
+GSM8K_PROMPT = (
+    "Solve the following math problem step by step.\n\n"
+    "Question: {question}\n\n"
+    "Answer:"
+)
+
+SUPERGPQA_PROMPT = (
+    "Answer the following multiple choice question.\n\n"
+    "Question: {question}\n\n"
+    "{options}\n\n"
+    "Answer:"
+)
+
+# -----------------------------
+# Benchmark runners
+# -----------------------------
+
+@torch.no_grad()
+def run_gsm8k(model, tokenizer, max_questions, batch_size, device):
+    dataset = load_dataset("gsm8k", "main", split="test")
+    if max_questions:
+        dataset = dataset.select(range(max_questions))
+
+    correct = 0
+    total = 0
+
+    for i in tqdm(range(0, len(dataset), batch_size), desc="GSM8K"):
+        batch = dataset[i:i + batch_size]
+        prompts = [
+            GSM8K_PROMPT.format(question=ex["question"])
+            for ex in batch
+        ]
+        inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True
+        ).to(device)
+
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=256,
+            do_sample=False
+        )
+
+        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        for ex, out in zip(batch, decoded):
+            gold = parse_gsm8k_gold(ex["answer"])
+            pred = parse_gsm8k_pred(out)
+            if gold is not None and pred == gold:
+                correct += 1
+            total += 1
+
+    acc = correct / total
+    ci = binomial_ci_95(correct, total)
+    return acc, ci, correct, total
+
+@torch.no_grad()
+def run_supergpqa(model, tokenizer, max_questions, batch_size, device, discipline=None, field=None):
+    dataset = load_dataset("m-a-p/SuperGPQA", split="train")
+
+    if discipline is not None:
+        want = discipline.strip().lower()
+        dataset = dataset.filter(
+            lambda ex: str(ex.get("discipline", "")).strip().lower() == want
+        )
+
+    if field is not None:
+        want = field.strip().lower()
+        dataset = dataset.filter(
+            lambda ex: str(ex.get("field", "")).strip().lower() == want
+        )
+
+    if max_questions:
+        dataset = dataset.select(range(max_questions))
+
+    correct = 0
+    total = 0
+
+    for i in tqdm(range(0, len(dataset), batch_size), desc="SuperGPQA"):
+        batch = dataset[i:i + batch_size]
+        prompts = []
+        for ex in batch:
+            options = "\n".join(
+                f"{chr(ord('A') + i)}. {opt}"
+                for i, opt in enumerate(ex["options"])
+            )
+            prompts.append(
+                SUPERGPQA_PROMPT.format(
+                    question=ex["question"],
+                    options=options
+                )
+            )
+
+        inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True
+        ).to(device)
+
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=64,
+            do_sample=False
+        )
+
+        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        for ex, out in zip(batch, decoded):
+            pred = parse_supergpqa_pred(out)
+            if pred == ex["answer_letter"]:
+                correct += 1
+            total += 1
+
+    acc = correct / total
+    ci = binomial_ci_95(correct, total)
+    return acc, ci, correct, total
+
+# -----------------------------
+# LoRA evaluation plan
+# -----------------------------
+
+LORA_EVAL_PLAN = [
+    # GSM8K
+    {
+        "lora": "marco-molinari/axbench-lora-basic_arithmetic_reasoning",
+        "benchmark": "gsm8k",
+    },
+
+    # SuperGPQA
+    {
+        "lora": "marco-molinari/axbench-lora-epidemiology_reasoning",
+        "benchmark": "supergpqa",
+        "discipline": "Medicine",
+    },
+    {
+        "lora": "marco-molinari/axbench-lora-classical_mechanics_reasoning",
+        "benchmark": "supergpqa",
+        "field": "Physics",
+    },
+    {
+        "lora": "marco-molinari/axbench-lora-organic_chemistry_reasoning",
+        "benchmark": "supergpqa",
+        "field": "Chemistry",
+    },
+    {
+        "lora": "marco-molinari/axbench-lora-medieval_european_history_reasoning",
+        "benchmark": "supergpqa",
+        "discipline": "History",
+    },
+    {
+        "lora": "marco-molinari/axbench-lora-constitutional_law_reasoning",
+        "benchmark": "supergpqa",
+        "discipline": "Legal",
+    },
+    {
+        "lora": "marco-molinari/axbench-lora-narrative_structure_reasoning",
+        "benchmark": "supergpqa",
+        "discipline": "Literature and Arts",
+    },
+]
+
+# -----------------------------
+# Main
+# -----------------------------
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base_model", default="google/gemma-2-2b-it")
+    parser.add_argument("--lora_models", nargs="+", required=True)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--max_questions", type=int, default=None)
+    parser.add_argument("--use_bf16", action="store_true")
+    parser.add_argument("--out_dir", default="lora_benchmarks")
+    args = parser.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    base_model = AutoModelForCausalLM.from_pretrained(
+        args.base_model,
+        torch_dtype=torch.bfloat16 if args.use_bf16 else None,
+        device_map="auto"
+    ).eval()
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for spec in LORA_EVAL_PLAN:
+        lora_path = spec["lora"]
+        benchmark = spec["benchmark"]
+        discipline = spec.get("discipline")
+        field = spec.get("field")
+
+        print(f"\n=== Evaluating LoRA: {lora_path} ===")
+
+        model = PeftModel.from_pretrained(base_model, lora_path)
+        model = model.eval()
+
+        if benchmark == "gsm8k":
+            acc, ci, correct, total = run_gsm8k(
+                model,
+                tokenizer,
+                args.max_questions,
+                args.batch_size,
+                device,
+            )
+        else:
+            acc, ci, correct, total = run_supergpqa(
+                model,
+                tokenizer,
+                args.max_questions,
+                args.batch_size,
+                device,
+                discipline=discipline,
+                field=field,
+            )
+
+        summary = {
+            "lora": lora_path,
+            "benchmark": benchmark,
+            "discipline": discipline,
+            "field": field,
+            "accuracy": acc,
+            "ci_95": {"low": ci[0], "high": ci[1]},
+            "correct": correct,
+            "total": total,
+        }
+
+        with open(out_dir / f"{benchmark}_{Path(lora_path).name}.json", "w") as f:
+            json.dump(summary, f, indent=2)
+
+        print(summary)
+
+
+if __name__ == "__main__":
+    main()
