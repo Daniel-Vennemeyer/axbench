@@ -320,6 +320,41 @@ def run_supergpqa(model, tokenizer, max_questions, batch_size, device, disciplin
 # -----------------------------
 
 LORA_EVAL_PLAN = [
+    # Base model (no LoRA)
+    {
+        "lora": None,
+        "benchmark": "gsm8k",
+    },
+    {
+        "lora": None,
+        "benchmark": "supergpqa",
+        "discipline": "Medicine",
+    },
+    {
+        "lora": None,
+        "benchmark": "supergpqa",
+        "field": "Physics",
+    },
+    {
+        "lora": None,
+        "benchmark": "supergpqa",
+        "field": "Chemistry",
+    },
+    {
+        "lora": None,
+        "benchmark": "supergpqa",
+        "discipline": "History",
+    },
+    {
+        "lora": None,
+        "benchmark": "supergpqa",
+        "discipline": "Legal",
+    },
+    {
+        "lora": None,
+        "benchmark": "supergpqa",
+        "discipline": "Literature and Arts",
+    },
     # GSM8K
     {
         "lora": "marco-molinari/axbench-lora-epoch5-basic_arithmetic_reasoning",
@@ -438,14 +473,18 @@ def main():
         discipline = spec.get("discipline")
         field = spec.get("field")
 
-        print(f"\n=== Evaluating LoRA: {lora_path} ===")
+        label = lora_path if lora_path is not None else "BASE_MODEL"
+        print(f"\n=== Evaluating: {label} ===")
 
         # Clear peft_config to avoid stacking adapters
         if hasattr(base_model, "peft_config"):
             base_model.peft_config.clear()
 
-        model = load_peft_model_robust(base_model, lora_path)
-        model = model.eval()
+        if lora_path is None:
+            model = base_model
+        else:
+            model = load_peft_model_robust(base_model, lora_path)
+            model = model.eval()
 
         if benchmark == "gsm8k":
             acc, ci, correct, total = run_gsm8k(
@@ -467,7 +506,7 @@ def main():
             )
 
         summary = {
-            "lora": lora_path,
+            "lora": lora_path if lora_path is not None else "BASE_MODEL",
             "benchmark": benchmark,
             "discipline": discipline,
             "field": field,
@@ -477,7 +516,8 @@ def main():
             "total": total,
         }
 
-        with open(out_dir / f"{benchmark}_{Path(lora_path).name}.json", "w") as f:
+        name = Path(lora_path).name if lora_path is not None else "BASE_MODEL"
+        with open(out_dir / f"{benchmark}_{name}.json", "w") as f:
             json.dump(summary, f, indent=2)
 
         print(summary)
