@@ -227,7 +227,7 @@ LORA_EVAL_PLAN = [
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base_model", default="google/gemma-2-2b-it")
-    parser.add_argument("--lora_models", nargs="+", required=True)
+    parser.add_argument("--lora_models", nargs="+", required=False)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--max_questions", type=int, default=None)
     parser.add_argument("--use_bf16", action="store_true")
