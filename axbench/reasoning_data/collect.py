@@ -42,9 +42,9 @@ import re
 
 def clean_category(text: str) -> str:
     text = text.strip().strip('"').strip("'")
-    if "\n" in text:
-        text = text.split("\n")[-1].strip()
-    text = re.sub(r'(?i).*?category is:?', '', text).strip()
+    text = text.split("\n")[0].strip()
+    text = re.sub(r"^[^A-Za-z]*", "", text)
+    text = re.sub(r"[^A-Za-z &\-]", "", text)
     return text
 
 
@@ -82,7 +82,7 @@ The field name should be:
 Question:
 ''{question}''
 
-Return ONLY the field name."""
+Return ONLY the field name:"""
 
 # -----------------------------
 # Classification Function
@@ -91,36 +91,41 @@ Return ONLY the field name."""
 def classify_reasoning_batch(questions):
     messages = [
         [
-            {"role": "system", "content": "You are an expert academic indexer."},
             {"role": "user", "content": CLASSIFICATION_PROMPT.format(question=q)}
         ]
         for q in questions
     ]
 
-    input_ids = tokenizer.apply_chat_template(
+    enc = tokenizer.apply_chat_template(
         messages,
         return_tensors="pt",
         padding=True,
-        add_generation_prompt=True
-    ).to(model.device)
+        add_generation_prompt=True,
+        return_dict=True
+    )
+
+    input_ids = enc["input_ids"].to(model.device)
+    attention_mask = enc["attention_mask"].to(model.device)
 
     with torch.no_grad():
         outputs = model.generate(
             input_ids=input_ids,
-            max_new_tokens=24,
+            attention_mask=attention_mask,
+            max_new_tokens=8,
             do_sample=True,
-            temperature=0.2,
+            temperature=0.15,
             top_p=0.9,
             repetition_penalty=1.1,
             pad_token_id=tokenizer.eos_token_id,
         )
 
-    decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+    decoded = tokenizer.batch_decode(
+        outputs[:, input_ids.shape[1]:],
+        skip_special_tokens=True
+    )
 
     categories = []
     for text in decoded:
-        if "assistant" in text:
-            text = text.split("assistant")[-1]
         category = clean_category(text)
         categories.append(category)
 
