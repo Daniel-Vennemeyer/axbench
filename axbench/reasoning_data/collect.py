@@ -1,4 +1,7 @@
-BATCH_SIZE = 4
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
+BATCH_SIZE = 16  # increase for better GPU utilization (adjust to 32 if memory allows)
 import json
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -9,7 +12,6 @@ from tqdm import tqdm
 # Paths
 # -----------------------------
 OUTPUT_PATH = "axbench/reasoning_data/reasoning_data.jsonl"
-USE_VLLM = False  # flip to True if using vLLM
 
 # -----------------------------
 # Load Model
@@ -17,18 +19,23 @@ USE_VLLM = False  # flip to True if using vLLM
 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 
-if not USE_VLLM:
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_NAME,
+    device_map="auto",
+    torch_dtype=torch.bfloat16,
+    trust_remote_code=True
     )
-else:
-    from vllm import LLM, SamplingParams
-    llm = LLM(model=MODEL_NAME, tensor_parallel_size=1)
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+
+model.eval()
+try:
+    model = torch.compile(model)
+except Exception:
+    pass
 
 import re
 
@@ -39,94 +46,84 @@ def clean_category(text: str) -> str:
     text = re.sub(r'(?i).*?category is:?', '', text).strip()
     return text
 
-def is_valid_category(text: str) -> bool:
-    if not re.fullmatch(r"[A-Za-z0-9 ]+", text):
-        return False
-    if not text.endswith("Reasoning"):
-        return False
-    if len(text.split()) < 2:
-        return False
-    return True
-
 
 # -----------------------------
 # Reasoning Category Prompt
 # -----------------------------
 
-CLASSIFICATION_PROMPT = """You are an expert at classifying reasoning tasks.
+CLASSIFICATION_PROMPT = """You are an expert academic indexer.
 
-Given the user question below, identify the SINGLE most appropriate reasoning domain category.
-Use highly specific categories, such as:
-- Number Theory Reasoning
-- Basic Arithmetic Reasoning
-- Organic Chemistry Reasoning
-- Data Structures Reasoning
-- Classical Mechanics Reasoning
-- Linear Algebra Reasoning
-- Computer Vision Reasoning
-- Medieval European History Reasoning
-- Renaissance Art History Reasoning
-- Modern US Politics Reasoning
-- Financial Accounting Reasoning
-- Epidemiology Reasoning
-- Constitutional Law Reasoning
-- Cybersecurity Reasoning
+Your task is to assign the question below to the SINGLE most relevant academic or professional FIELD.
 
-Return ONLY the category name, nothing else.
+Instructions:
+- Classify by subject matter only.
+- Do NOT describe the type of reasoning.
+- Do NOT include words like “Reasoning”, “Analysis”, or “Thinking”.
+- Choose the field that a university department or textbook would place this question in.
 
-User question:
-\"\"\"{question}\"\"\""""
+Process (do this silently):
+1) Identify what the question is fundamentally ABOUT.
+2) Identify the discipline that studies that subject.
+
+Example Medical-field classifications:
+- Use “Clinical Medicine” for diagnosis, treatment, symptoms, physiology, or patient care.
+- Use “Pharmacology” for drugs, mechanisms, dosing, or interactions.
+- Use “Epidemiology” if the question is about populations, prevalence, incidence, risk factors, or disease spread.
+- More examples: use “Genetics”, “Neuroscience”, “Public Health”, “Pathology”, “Immunology”, etc.
+
+If no standard field fits exactly, invent a reasonable and concise field name.
+
+The field name should be:
+- 1–4 words
+- A noun phrase
+- A standard academic discipline or subfield
+
+Question:
+''{question}''
+
+Return ONLY the field name."""
 
 # -----------------------------
 # Classification Function
 # -----------------------------
 
-def classify_reasoning_category(question: str) -> str:
+def classify_reasoning_batch(questions):
     messages = [
-        {"role": "system", "content": "You are an expert at classifying reasoning tasks."},
-        {"role": "user", "content": CLASSIFICATION_PROMPT.format(question=question)}
+        [
+            {"role": "system", "content": "You are an expert academic indexer."},
+            {"role": "user", "content": CLASSIFICATION_PROMPT.format(question=q)}
+        ]
+        for q in questions
     ]
-
-    if USE_VLLM:
-        outputs = llm.generate(CLASSIFICATION_PROMPT.format(question=question), sampling_params)
-        return outputs[0].outputs[0].text.strip()
 
     input_ids = tokenizer.apply_chat_template(
         messages,
         return_tensors="pt",
+        padding=True,
         add_generation_prompt=True
     ).to(model.device)
 
     with torch.no_grad():
-        output = model.generate(
+        outputs = model.generate(
             input_ids=input_ids,
-            max_new_tokens=32,
-            do_sample=False,
+            max_new_tokens=24,
+            do_sample=True,
+            temperature=0.2,
+            top_p=0.9,
+            repetition_penalty=1.1,
+            pad_token_id=tokenizer.eos_token_id,
         )
-    decoded = tokenizer.decode(output[0], skip_special_tokens=True)
 
-    # Extract only assistant content
-    if "assistant" in decoded:
-        decoded = decoded.split("assistant")[-1]
+    decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
-    # Keep only last non-empty line
-    category = clean_category(decoded)
+    categories = []
+    for text in decoded:
+        if "assistant" in text:
+            text = text.split("assistant")[-1]
+        category = clean_category(text)
+        categories.append(category)
 
-    tries = 0
-    while not is_valid_category(category) and tries < 5:
-        with torch.no_grad():
-            output = model.generate(
-                input_ids=input_ids,
-                max_new_tokens=32,
-                do_sample=False,
-            )
-        decoded = tokenizer.decode(output[0], skip_special_tokens=True)
-        if "assistant" in decoded:
-            decoded = decoded.split("assistant")[-1]
-        category = clean_category(decoded)
-        tries += 1
-
-    return category
+    return categories
 
 
 # -----------------------------
@@ -161,15 +158,18 @@ output_rows = []
 
 batch_inputs = []
 batch_assistants = []
+batch_negatives = []
 
 for ex in tqdm(ds["train"], desc="Classifying examples"):
     user_input, assistant_output = extract_user_and_assistant(ex["chosen"])
+    _, negative_output = extract_user_and_assistant(ex["rejected"])
     batch_inputs.append(user_input)
     batch_assistants.append(assistant_output)
+    batch_negatives.append(negative_output)
 
     if len(batch_inputs) == BATCH_SIZE:
         # classify as batch
-        categories = [classify_reasoning_category(q) for q in batch_inputs]
+        categories = classify_reasoning_batch(batch_inputs)
 
         for i in range(BATCH_SIZE):
             category = categories[i]
@@ -184,6 +184,7 @@ for ex in tqdm(ds["train"], desc="Classifying examples"):
             record = {
                 "input": batch_inputs[i],
                 "output": batch_assistants[i],
+                "output_negative": batch_negatives[i],
                 "output_concept": category,
                 "concept_genre": "positive",
                 "dataset_category": "instruction",
@@ -193,10 +194,11 @@ for ex in tqdm(ds["train"], desc="Classifying examples"):
 
         batch_inputs = []
         batch_assistants = []
+        batch_negatives = []
 
 # process remainder
 for i in range(len(batch_inputs)):
-    category = classify_reasoning_category(batch_inputs[i])
+    category = classify_reasoning_batch([batch_inputs[i]])[0]
 
     if next_concept_id < 100:
         print(f"Example {next_concept_id}: {category}")
@@ -208,6 +210,7 @@ for i in range(len(batch_inputs)):
     record = {
         "input": batch_inputs[i],
         "output": batch_assistants[i],
+        "output_negative": batch_negatives[i],
         "output_concept": category,
         "concept_genre": "positive",
         "dataset_category": "instruction",
