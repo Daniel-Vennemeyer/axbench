@@ -375,17 +375,33 @@ def score_fields(questions):
 
         prompt_len = enc_prompt.input_ids.shape[1]
 
-        # Build batch: prompt + each field
+        # Build batch: prompt + each field (pad field suffixes)
         input_ids = []
         attention_masks = []
         field_token_lens = []
 
+        max_field_len = max(fe["input_ids"].shape[1] for fe in field_encodings)
+
         for fe in field_encodings:
-            ids = torch.cat([enc_prompt.input_ids, fe["input_ids"].to(device)], dim=1)
+            field_ids = fe["input_ids"].to(device)
+            field_len = field_ids.shape[1]
+
+            # Pad field suffix to max_field_len
+            if field_len < max_field_len:
+                pad = torch.full(
+                    (1, max_field_len - field_len),
+                    tokenizer.pad_token_id,
+                    device=device,
+                    dtype=field_ids.dtype,
+                )
+                field_ids = torch.cat([field_ids, pad], dim=1)
+
+            ids = torch.cat([enc_prompt.input_ids, field_ids], dim=1)
             mask = torch.ones_like(ids)
+
             input_ids.append(ids)
             attention_masks.append(mask)
-            field_token_lens.append(fe["input_ids"].shape[1])
+            field_token_lens.append(field_len)
 
         input_ids = torch.cat(input_ids, dim=0)
         attention_masks = torch.cat(attention_masks, dim=0)
