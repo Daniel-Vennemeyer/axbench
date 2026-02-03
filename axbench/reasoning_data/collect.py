@@ -70,6 +70,9 @@ CLASSIFICATION_PROMPT = """You are an expert academic indexer.
 
 Your task is to assign the question below to the SINGLE most relevant academic or professional FIELD.
 
+Question:
+''{question}''
+
 Instructions:
 - Classify by subject matter only.
 - Do NOT describe the type of reasoning.
@@ -92,9 +95,6 @@ The field name should be:
 - 1–4 words
 - A noun phrase
 - A standard academic discipline or subfield
-
-Question:
-''{question}''
 
 Return ONLY the field name.
 Do not repeat the instructions.
