@@ -49,6 +49,18 @@ def clean_category(text: str) -> str:
     text = re.sub(r"[^A-Za-z &\-]", "", text)
     return text
 
+def is_valid_category(cat: str) -> bool:
+    if not cat:
+        return False
+    # Too long to be a field name
+    if len(cat.split()) > 4:
+        return False
+    banned = [
+        "write", "response", "answer", "instruction",
+        "follow", "process", "unable", "cannot",
+        "provide", "classify", "determine"
+    ]
+    return not any(b in cat for b in banned)
 
 # -----------------------------
 # Reasoning Category Prompt
@@ -85,6 +97,8 @@ Question:
 ''{question}''
 
 Return ONLY the field name.
+Do not repeat the instructions.
+Do not explain.
 
 Field:"""
 
@@ -104,6 +118,8 @@ def classify_reasoning_batch(questions):
         messages,
         return_tensors="pt",
         padding=True,
+        truncation=True,
+        max_length=2048,
         add_generation_prompt=True,
         return_dict=True
     )
@@ -115,11 +131,11 @@ def classify_reasoning_batch(questions):
         outputs = model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            max_new_tokens=8,
+            max_new_tokens=6,
             do_sample=False,
-            temperature=0.0,
-            repetition_penalty=1.1,
             pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            use_cache=False,
         )
 
     decoded = tokenizer.batch_decode(
@@ -129,8 +145,9 @@ def classify_reasoning_batch(questions):
 
     categories = []
     for text in decoded:
-        category = clean_category(text)
-        category = normalize_category(category)
+        category = normalize_category(clean_category(text))
+        if not is_valid_category(category):
+            category = "unknown"
         categories.append(category)
 
     return categories
