@@ -4,6 +4,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 BATCH_SIZE = 4  # increase for better GPU utilization (adjust to 32 if memory allows)
+FIELD_BATCH_SIZE = 16  # tune: 8–32 depending on GPU memory
 import json
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -403,34 +404,39 @@ def score_fields(questions):
             attention_masks.append(mask)
             field_token_lens.append(field_len)
 
-        input_ids = torch.cat(input_ids, dim=0)
-        attention_masks = torch.cat(attention_masks, dim=0)
-
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_masks,
-        )
-
-        logits = outputs.logits
-
         scores = []
-        for i, field_len in enumerate(field_token_lens):
-            field_logits = logits[
-                i,
-                prompt_len - 1 : prompt_len - 1 + field_len,
-                :
-            ]
-            log_probs = torch.log_softmax(field_logits, dim=-1)
+        num_fields = len(field_encodings)
+        for start in range(0, num_fields, FIELD_BATCH_SIZE):
+            end = min(start + FIELD_BATCH_SIZE, num_fields)
 
-            # field_ids: [1, field_len] -> [field_len]
-            field_ids = field_encodings[i]["input_ids"].to(device).squeeze(0)
+            batch_input_ids = torch.cat(input_ids[start:end], dim=0)
+            batch_attention_masks = torch.cat(attention_masks[start:end], dim=0)
+            batch_field_lens = field_token_lens[start:end]
 
-            # gather expects index shape [field_len, 1]
-            token_logprobs = log_probs.gather(
-                -1, field_ids.unsqueeze(-1)
-            ).squeeze(-1)
+            outputs = model(
+                input_ids=batch_input_ids,
+                attention_mask=batch_attention_masks,
+            )
 
-            scores.append(token_logprobs.sum().item())
+            batch_logits = outputs.logits
+
+            for j, field_len in enumerate(batch_field_lens):
+                idx = start + j
+
+                field_logits = batch_logits[
+                    j,
+                    prompt_len - 1 : prompt_len - 1 + field_len,
+                    :
+                ]
+                log_probs = torch.log_softmax(field_logits, dim=-1)
+
+                field_ids = field_encodings[idx]["input_ids"].to(device).squeeze(0)
+
+                token_logprobs = log_probs.gather(
+                    -1, field_ids.unsqueeze(-1)
+                ).squeeze(-1)
+
+                scores.append(token_logprobs.sum().item())
 
         best_idx = int(torch.tensor(scores).argmax())
         results.append(ALLOWED_FIELDS[best_idx])
