@@ -12,10 +12,19 @@ from tqdm import tqdm
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
+import argparse
+import os
+import torch.multiprocessing as mp
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--shard_id", type=int, default=0)
+parser.add_argument("--num_shards", type=int, default=1)
+args = parser.parse_args()
+
 # -----------------------------
 # Paths
 # -----------------------------
-OUTPUT_PATH = "axbench/reasoning_data/reasoning_data.jsonl"
+OUTPUT_PATH = f"axbench/reasoning_data/reasoning_data_shard{args.shard_id}.jsonl"
 
 # -----------------------------
 # Load Model
@@ -312,7 +321,7 @@ SHORTLIST_K = 12  # tune: 8–20
 
 embedder = SentenceTransformer(
     EMBED_MODEL_NAME,
-    device=str(model.device),
+    device="cpu",
 )
 
 # Precompute normalized embeddings for fields (once)
@@ -503,46 +512,74 @@ def extract_user_and_assistant(messages):
             assistant_msg = m["content"].strip()
     return user_msg, assistant_msg
 
-# -----------------------------
-# Load Old Dataset
-# -----------------------------
-
-ds = load_dataset("kenhktsui/longtalk-cot-v0.1")
 
 # -----------------------------
-# Convert + Categorize
+# Multiprocessing worker logic
 # -----------------------------
 
-concept_map = {}   # category → concept_id
-next_concept_id = 0
+def run_worker(shard_id, num_shards):
+    global args
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(shard_id)
+    torch.cuda.set_device(0)
+    args.shard_id = shard_id
+    args.num_shards = num_shards
 
-output_rows = []
+    # -----------------------------
+    # Load Old Dataset
+    # -----------------------------
+    ds = load_dataset("kenhktsui/longtalk-cot-v0.1")
 
-batch_inputs = []
-batch_assistants = []
-batch_negatives = []
+    # -----------------------------
+    # Convert + Categorize
+    # -----------------------------
+    concept_map = {}   # category → concept_id
+    next_concept_id = 0
+    output_rows = []
+    batch_inputs = []
+    batch_assistants = []
+    batch_negatives = []
+    for i, ex in enumerate(tqdm(ds["train"], desc="Classifying examples")):
+        if (i % args.num_shards) != args.shard_id:
+            continue
+        user_input, assistant_output = extract_user_and_assistant(ex["chosen"])
+        _, negative_output = extract_user_and_assistant(ex["rejected"])
+        batch_inputs.append(user_input)
+        batch_assistants.append(assistant_output)
+        batch_negatives.append(negative_output)
 
-for ex in tqdm(ds["train"], desc="Classifying examples"):
-    user_input, assistant_output = extract_user_and_assistant(ex["chosen"])
-    _, negative_output = extract_user_and_assistant(ex["rejected"])
-    batch_inputs.append(user_input)
-    batch_assistants.append(assistant_output)
-    batch_negatives.append(negative_output)
+        if len(batch_inputs) == BATCH_SIZE:
+            # classify as batch
+            categories = classify_reasoning_batch(batch_inputs)
+            for i in range(BATCH_SIZE):
+                category = categories[i]
+                if next_concept_id < 100:
+                    print(f"Example {next_concept_id}: {category}")
+                if category not in concept_map:
+                    concept_map[category] = next_concept_id
+                    next_concept_id += 1
+                record = {
+                    "input": batch_inputs[i],
+                    "output": batch_assistants[i],
+                    "output_negative": batch_negatives[i],
+                    "output_concept": category,
+                    "concept_genre": "positive",
+                    "dataset_category": "instruction",
+                    "concept_id": concept_map[category]
+                }
+                output_rows.append(record)
+            batch_inputs = []
+            batch_assistants = []
+            batch_negatives = []
 
-    if len(batch_inputs) == BATCH_SIZE:
-        # classify as batch
+    # process remainder as a single batch
+    if batch_inputs:
         categories = classify_reasoning_batch(batch_inputs)
-
-        for i in range(BATCH_SIZE):
-            category = categories[i]
-
+        for i, category in enumerate(categories):
             if next_concept_id < 100:
                 print(f"Example {next_concept_id}: {category}")
-
             if category not in concept_map:
                 concept_map[category] = next_concept_id
                 next_concept_id += 1
-
             record = {
                 "input": batch_inputs[i],
                 "output": batch_assistants[i],
@@ -554,41 +591,35 @@ for ex in tqdm(ds["train"], desc="Classifying examples"):
             }
             output_rows.append(record)
 
-        batch_inputs = []
-        batch_assistants = []
-        batch_negatives = []
+    # -----------------------------
+    # Save Final Output
+    # -----------------------------
+    output_path = f"axbench/reasoning_data/reasoning_data_shard{args.shard_id}.jsonl"
+    with open(output_path, "w") as f:
+        for ex in output_rows:
+            f.write(json.dumps(ex) + "\n")
 
-# process remainder as a single batch
-if batch_inputs:
-    categories = classify_reasoning_batch(batch_inputs)
-    for i, category in enumerate(categories):
-        if next_concept_id < 100:
-            print(f"Example {next_concept_id}: {category}")
+    print(f"Done! Wrote shard {args.shard_id}/{args.num_shards} to {output_path}")
+    print("Discovered categories:")
+    for k, v in concept_map.items():
+        print(f"{v}: {k}")
 
-        if category not in concept_map:
-            concept_map[category] = next_concept_id
-            next_concept_id += 1
-
-        record = {
-            "input": batch_inputs[i],
-            "output": batch_assistants[i],
-            "output_negative": batch_negatives[i],
-            "output_concept": category,
-            "concept_genre": "positive",
-            "dataset_category": "instruction",
-            "concept_id": concept_map[category]
-        }
-        output_rows.append(record)
 
 # -----------------------------
-# Save Final Output
+# Main entrypoint for multiprocessing
 # -----------------------------
 
-with open(OUTPUT_PATH, "w") as f:
-    for ex in output_rows:
-        f.write(json.dumps(ex) + "\n")
-
-print("Done! Wrote", OUTPUT_PATH)
-print("Discovered categories:")
-for k, v in concept_map.items():
-    print(f"{v}: {k}")
+if __name__ == "__main__":
+    num_gpus = torch.cuda.device_count()
+    if num_gpus >= 2:
+        print(f"Launching {num_gpus} workers (one per GPU)")
+        mp.set_start_method("spawn", force=True)
+        mp.spawn(
+            run_worker,
+            args=(num_gpus,),
+            nprocs=num_gpus,
+            join=True,
+        )
+    else:
+        print("Single GPU detected; running in single-process mode")
+        run_worker(0, 1)
