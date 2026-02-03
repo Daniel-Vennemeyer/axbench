@@ -9,6 +9,8 @@ import json
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
+import numpy as np
+from sentence_transformers import SentenceTransformer
 
 # -----------------------------
 # Paths
@@ -292,6 +294,7 @@ ALLOWED_FIELDS = [
 
 
 # Use the FIRST token of each field name
+# Use the FIRST token of each field name
 ALLOWED_TOKEN_IDS = set()
 for field in ALLOWED_FIELDS:
     tok = tokenizer(field, add_special_tokens=False)["input_ids"]
@@ -299,6 +302,26 @@ for field in ALLOWED_FIELDS:
         ALLOWED_TOKEN_IDS.add(tok[0])
 
 LOGITS_PROCESSOR = ClosedSetLogitsProcessor(ALLOWED_TOKEN_IDS)
+
+# -----------------------------
+# Sentence-embedding shortlist
+# -----------------------------
+
+EMBED_MODEL_NAME = "BAAI/bge-large-en-v1.5"
+SHORTLIST_K = 12  # tune: 8–20
+
+embedder = SentenceTransformer(
+    EMBED_MODEL_NAME,
+    device=str(model.device),
+)
+
+# Precompute normalized embeddings for fields (once)
+field_embeddings = embedder.encode(
+    ALLOWED_FIELDS,
+    normalize_embeddings=True,
+    batch_size=64,
+    show_progress_bar=True,
+)
 
 import re
 
@@ -349,7 +372,21 @@ FIELD:"""
 # -----------------------------
 
 
+
 # --- Efficient closed-set classification via batched log-likelihood scoring ---
+def shortlist_fields(question: str):
+    """
+    Return indices of top-K candidate fields using cosine similarity.
+    """
+    q_emb = embedder.encode(
+        [question],
+        normalize_embeddings=True,
+    )[0]
+
+    sims = field_embeddings @ q_emb  # cosine since normalized
+    topk_idx = np.argpartition(-sims, SHORTLIST_K)[:SHORTLIST_K]
+    return topk_idx.tolist()
+
 @torch.no_grad()
 def score_fields(questions):
     """
@@ -358,13 +395,17 @@ def score_fields(questions):
     device = model.device
     results = []
 
-    # Pre-tokenize all field labels once
-    field_encodings = [
-        tokenizer(" " + f, add_special_tokens=False, return_tensors="pt")
-        for f in ALLOWED_FIELDS
-    ]
-
     for q in questions:
+        # --- shortlist fields ---
+        candidate_idx = shortlist_fields(q)
+        candidate_fields = [ALLOWED_FIELDS[i] for i in candidate_idx]
+
+        # tokenize candidate fields
+        field_encodings = [
+            tokenizer(" " + f, add_special_tokens=False, return_tensors="pt")
+            for f in candidate_fields
+        ]
+
         prompt = CLASSIFICATION_PROMPT.format(question=q)
 
         enc_prompt = tokenizer(
@@ -376,7 +417,6 @@ def score_fields(questions):
 
         prompt_len = enc_prompt.input_ids.shape[1]
 
-        # Build batch: prompt + each field (pad field suffixes)
         input_ids = []
         attention_masks = []
         field_token_lens = []
@@ -387,7 +427,6 @@ def score_fields(questions):
             field_ids = fe["input_ids"].to(device)
             field_len = field_ids.shape[1]
 
-            # Pad field suffix to max_field_len
             if field_len < max_field_len:
                 pad = torch.full(
                     (1, max_field_len - field_len),
@@ -406,6 +445,7 @@ def score_fields(questions):
 
         scores = []
         num_fields = len(field_encodings)
+
         for start in range(0, num_fields, FIELD_BATCH_SIZE):
             end = min(start + FIELD_BATCH_SIZE, num_fields)
 
@@ -421,8 +461,6 @@ def score_fields(questions):
             batch_logits = outputs.logits
 
             for j, field_len in enumerate(batch_field_lens):
-                idx = start + j
-
                 field_logits = batch_logits[
                     j,
                     prompt_len - 1 : prompt_len - 1 + field_len,
@@ -430,7 +468,7 @@ def score_fields(questions):
                 ]
                 log_probs = torch.log_softmax(field_logits, dim=-1)
 
-                field_ids = field_encodings[idx]["input_ids"].to(device).squeeze(0)
+                field_ids = field_encodings[start + j]["input_ids"].to(device).squeeze(0)
 
                 token_logprobs = log_probs.gather(
                     -1, field_ids.unsqueeze(-1)
@@ -438,8 +476,8 @@ def score_fields(questions):
 
                 scores.append(token_logprobs.sum().item())
 
-        best_idx = int(torch.tensor(scores).argmax())
-        results.append(ALLOWED_FIELDS[best_idx])
+        best_local = int(torch.tensor(scores).argmax())
+        results.append(candidate_fields[best_local])
 
     return results
 
