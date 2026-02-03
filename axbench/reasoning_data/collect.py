@@ -107,21 +107,17 @@ Field:"""
 # -----------------------------
 
 def classify_reasoning_batch(questions):
-    messages = [
-        [
-            {"role": "user", "content": CLASSIFICATION_PROMPT.format(question=q)}
-        ]
+    prompts = [
+        CLASSIFICATION_PROMPT.format(question=q)
         for q in questions
     ]
 
-    enc = tokenizer.apply_chat_template(
-        messages,
+    enc = tokenizer(
+        prompts,
         return_tensors="pt",
         padding=True,
         truncation=True,
         max_length=2048,
-        add_generation_prompt=True,
-        return_dict=True
     )
 
     input_ids = enc["input_ids"].to(model.device)
