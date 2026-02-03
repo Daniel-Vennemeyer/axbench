@@ -34,16 +34,6 @@ model = AutoModelForCausalLM.from_pretrained(
 
 model.eval()
 
-from transformers import LogitsProcessor
-
-class ClosedSetLogitsProcessor(LogitsProcessor):
-    def __init__(self, allowed_token_ids):
-        self.allowed = set(allowed_token_ids)
-
-    def __call__(self, input_ids, scores):
-        mask = torch.full_like(scores, float("-inf"))
-        mask[:, list(self.allowed)] = 0.0
-        return scores + mask
 
 
 # -----------------------------
@@ -290,14 +280,7 @@ ALLOWED_FIELDS = [
 ]
 
 
-# Use the FIRST token of each field name
-ALLOWED_TOKEN_IDS = set()
-for field in ALLOWED_FIELDS:
-    tok = tokenizer(field, add_special_tokens=False)["input_ids"]
-    if len(tok) > 0:
-        ALLOWED_TOKEN_IDS.add(tok[0])
 
-LOGITS_PROCESSOR = ClosedSetLogitsProcessor(ALLOWED_TOKEN_IDS)
 
 import re
 
@@ -331,78 +314,80 @@ def is_valid_category(cat: str) -> bool:
 # Reasoning Category Prompt
 # -----------------------------
 
-CLASSIFICATION_PROMPT = """Classify the QUESTION into the single best matching FIELD from a predefined list.
-
-Rules:
-- Classify by subject matter only (not by "type of reasoning").
-- Output ONLY the field name (no extra words, no punctuation).
-- If none of the predefined fields apply, output: unknown
-
-QUESTION:
+CLASSIFICATION_PROMPT = """Question:
 {question}
 
-FIELD:"""
+The academic field of this question is:"""
+
+
+# -----------------------------
+# Score-based field classifier
+# -----------------------------
+
+@torch.no_grad()
+def score_fields(questions):
+    """
+    Return the best field for each question by computing
+    the conditional log-likelihood of each field label.
+    """
+    device = model.device
+    results = []
+
+    for q in questions:
+        prompt = CLASSIFICATION_PROMPT.format(question=q)
+
+        # Encode prompt once
+        enc_prompt = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=2048,
+        ).to(device)
+
+        best_field = "unknown"
+        best_score = None
+
+        for field in ALLOWED_FIELDS:
+            # Score P(field | prompt)
+            enc_field = tokenizer(
+                " " + field,
+                return_tensors="pt",
+                add_special_tokens=False,
+            ).to(device)
+
+            input_ids = torch.cat(
+                [enc_prompt.input_ids, enc_field.input_ids], dim=1
+            )
+            attention_mask = torch.ones_like(input_ids)
+
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+
+            logits = outputs.logits[:, -enc_field.input_ids.shape[1]-1:-1, :]
+            log_probs = torch.log_softmax(logits, dim=-1)
+
+            token_logprobs = log_probs.gather(
+                -1, enc_field.input_ids.unsqueeze(-1)
+            ).squeeze(-1)
+
+            score = token_logprobs.sum().item()
+
+            if best_score is None or score > best_score:
+                best_score = score
+                best_field = field
+
+        results.append(best_field)
+
+    return results
 
 # -----------------------------
 # Classification Function
 # -----------------------------
 
 def classify_reasoning_batch(questions):
-    prompts = [
-        CLASSIFICATION_PROMPT.format(question=q)
-        for q in questions
-    ]
-
-    enc = tokenizer(
-        prompts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=2048,
-    )
-
-    input_ids = enc["input_ids"].to(model.device)
-    attention_mask = enc["attention_mask"].to(model.device)
-
-    with torch.no_grad():
-        outputs = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=8,
-            do_sample=False,
-            logits_processor=[LOGITS_PROCESSOR],
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            use_cache=False,
-        )
-
-    decoded = tokenizer.batch_decode(
-        outputs[:, input_ids.shape[1]:],
-        skip_special_tokens=True
-    )
-
-    categories = []
-    allowed_set = set(ALLOWED_FIELDS)
-
-    for text in decoded:
-        raw = normalize_category(clean_category(text))
-
-        # Exact match
-        if raw in allowed_set:
-            categories.append(raw)
-            continue
-
-        # If the model emitted a prefix, try to resolve to a unique allowed field.
-        # (e.g., "complex analysis" might come back as "complex" if truncated)
-        prefix_matches = [f for f in ALLOWED_FIELDS if f.startswith(raw) and raw]
-        if len(prefix_matches) == 1:
-            categories.append(prefix_matches[0])
-            continue
-
-        # Otherwise, fall back safely
-        categories.append("unknown")
-
-    return categories
+    return score_fields(questions)
 
 
 # -----------------------------
