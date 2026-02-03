@@ -218,3 +218,7 @@ axbench/scripts/paper/
 
 
 axbench/reasoning_data/reasoning_data.jsonl
+
+# generated datasets
+axbench/reasoning_data/reasoning_hf_parquet/
+*.parquet
