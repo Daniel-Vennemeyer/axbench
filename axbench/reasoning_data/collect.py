@@ -286,6 +286,7 @@ ALLOWED_FIELDS = [
     "tax law",
     "labor law",
     "mergers and acquisitions",
+    "unknown",
 ]
 
 
@@ -330,41 +331,17 @@ def is_valid_category(cat: str) -> bool:
 # Reasoning Category Prompt
 # -----------------------------
 
-CLASSIFICATION_PROMPT = """You are an expert academic indexer.
+CLASSIFICATION_PROMPT = """Classify the QUESTION into the single best matching FIELD from a predefined list.
 
-Your task is to assign the question below to the SINGLE most relevant academic or professional FIELD.
+Rules:
+- Classify by subject matter only (not by "type of reasoning").
+- Output ONLY the field name (no extra words, no punctuation).
+- If none of the predefined fields apply, output: unknown
 
-Question:
-''{question}''
+QUESTION:
+{question}
 
-Instructions:
-- Classify by subject matter only.
-- Do NOT describe the type of reasoning.
-- Do NOT include words like “Reasoning”, “Analysis”, or “Thinking”.
-- Choose the field that a university department or textbook would place this question in.
-
-Process (do this silently):
-1) Identify what the question is fundamentally ABOUT.
-2) Identify the discipline that studies that subject.
-
-Example Medical-field classifications:
-- Use “Clinical Medicine” for diagnosis, treatment, symptoms, physiology, or patient care.
-- Use “Pharmacology” for drugs, mechanisms, dosing, or interactions.
-- Use “Epidemiology” if the question is about populations, prevalence, incidence, risk factors, or disease spread.
-- More examples: use “Genetics”, “Neuroscience”, “Public Health”, “Pathology”, “Immunology”, etc.
-
-If no standard field fits exactly, invent a reasonable and concise field name.
-
-The field name should be:
-- 1–4 words
-- A noun phrase
-- A standard academic discipline or subfield
-
-Return ONLY the field name.
-Do not repeat the instructions.
-Do not explain.
-
-Field:"""
+FIELD:"""
 
 # -----------------------------
 # Classification Function
@@ -391,7 +368,7 @@ def classify_reasoning_batch(questions):
         outputs = model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            max_new_tokens=3,
+            max_new_tokens=8,
             do_sample=False,
             logits_processor=[LOGITS_PROCESSOR],
             pad_token_id=tokenizer.eos_token_id,
@@ -405,11 +382,25 @@ def classify_reasoning_batch(questions):
     )
 
     categories = []
+    allowed_set = set(ALLOWED_FIELDS)
+
     for text in decoded:
-        category = normalize_category(clean_category(text))
-        if category not in ALLOWED_FIELDS:
-            category = "unknown"
-        categories.append(category)
+        raw = normalize_category(clean_category(text))
+
+        # Exact match
+        if raw in allowed_set:
+            categories.append(raw)
+            continue
+
+        # If the model emitted a prefix, try to resolve to a unique allowed field.
+        # (e.g., "complex analysis" might come back as "complex" if truncated)
+        prefix_matches = [f for f in ALLOWED_FIELDS if f.startswith(raw) and raw]
+        if len(prefix_matches) == 1:
+            categories.append(prefix_matches[0])
+            continue
+
+        # Otherwise, fall back safely
+        categories.append("unknown")
 
     return categories
 
