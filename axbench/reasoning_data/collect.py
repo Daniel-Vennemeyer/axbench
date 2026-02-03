@@ -3,7 +3,7 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-BATCH_SIZE = 4  # increase for better GPU utilization (adjust to 32 if memory allows)
+BATCH_SIZE = 6  # increase for better GPU utilization (adjust to 32 if memory allows)
 FIELD_BATCH_SIZE = 16  # tune: 8–32 depending on GPU memory
 import json
 from datasets import load_dataset
