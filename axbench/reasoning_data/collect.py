@@ -3,7 +3,7 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-BATCH_SIZE = 8  # increase for better GPU utilization (adjust to 32 if memory allows)
+BATCH_SIZE = 4  # increase for better GPU utilization (adjust to 32 if memory allows)
 import json
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
