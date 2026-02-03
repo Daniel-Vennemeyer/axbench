@@ -4,7 +4,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 BATCH_SIZE = 12          # doubles throughput, safe on 80GB
-FIELD_BATCH_SIZE = 32    # better kernel occupancy
+FIELD_BATCH_SIZE = 20    # better kernel occupancy
 
 # Enable Flash/SDPA attention for higher throughput
 torch.backends.cuda.enable_flash_sdp(True)
