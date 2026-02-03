@@ -416,6 +416,12 @@ def score_fields(questions):
 
     return results
 
+def classify_reasoning_batch(questions):
+    """
+    Backwards-compatible wrapper.
+    """
+    return score_fields(questions)
+
 
 # -----------------------------
 # Helper: Extract messages
