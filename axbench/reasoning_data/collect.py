@@ -30,21 +30,6 @@ OUTPUT_PATH = f"axbench/reasoning_data/reasoning_data_shard{args.shard_id}.jsonl
 # Load Model
 # -----------------------------
 
-MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507"
-
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_NAME,
-    device_map="auto",
-    torch_dtype=torch.bfloat16,
-    trust_remote_code=True
-    )
-
-model.eval()
 
 from transformers import LogitsProcessor
 
@@ -303,14 +288,9 @@ ALLOWED_FIELDS = [
 
 
 # Use the FIRST token of each field name
-# Use the FIRST token of each field name
+# NOTE: tokenizer and LOGITS_PROCESSOR will be initialized per worker after model loading
 ALLOWED_TOKEN_IDS = set()
-for field in ALLOWED_FIELDS:
-    tok = tokenizer(field, add_special_tokens=False)["input_ids"]
-    if len(tok) > 0:
-        ALLOWED_TOKEN_IDS.add(tok[0])
-
-LOGITS_PROCESSOR = ClosedSetLogitsProcessor(ALLOWED_TOKEN_IDS)
+LOGITS_PROCESSOR = None
 
 # -----------------------------
 # Sentence-embedding shortlist
@@ -401,6 +381,8 @@ def score_fields(questions):
     """
     Efficient closed-set classification via batched log-likelihood scoring.
     """
+    model = globals()["model"]
+    tokenizer = globals()["tokenizer"]
     device = model.device
     results = []
 
@@ -523,6 +505,37 @@ def run_worker(shard_id, num_shards):
     torch.cuda.set_device(0)
     args.shard_id = shard_id
     args.num_shards = num_shards
+
+    # -----------------------------
+    # Load model (per worker, after GPU is set)
+    # -----------------------------
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        device_map="auto",
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+    )
+    model.eval()
+
+    # Use the FIRST token of each field name (initialize per worker)
+    ALLOWED_TOKEN_IDS = set()
+    for field in ALLOWED_FIELDS:
+        tok = tokenizer(field, add_special_tokens=False)["input_ids"]
+        if len(tok) > 0:
+            ALLOWED_TOKEN_IDS.add(tok[0])
+    global LOGITS_PROCESSOR
+    LOGITS_PROCESSOR = ClosedSetLogitsProcessor(ALLOWED_TOKEN_IDS)
+
+    # make model visible to scoring functions
+    globals()["model"] = model
+    globals()["tokenizer"] = tokenizer
 
     # -----------------------------
     # Load Old Dataset
