@@ -421,10 +421,15 @@ def score_fields(questions):
                 :
             ]
             log_probs = torch.log_softmax(field_logits, dim=-1)
-            field_ids = field_encodings[i]["input_ids"].to(device)
+
+            # field_ids: [1, field_len] -> [field_len]
+            field_ids = field_encodings[i]["input_ids"].to(device).squeeze(0)
+
+            # gather expects index shape [field_len, 1]
             token_logprobs = log_probs.gather(
                 -1, field_ids.unsqueeze(-1)
             ).squeeze(-1)
+
             scores.append(token_logprobs.sum().item())
 
         best_idx = int(torch.tensor(scores).argmax())
