@@ -3,7 +3,7 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-BATCH_SIZE = 16  # increase for better GPU utilization (adjust to 32 if memory allows)
+BATCH_SIZE = 8  # increase for better GPU utilization (adjust to 32 if memory allows)
 import json
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -33,12 +33,14 @@ model = AutoModelForCausalLM.from_pretrained(
     )
 
 model.eval()
-try:
-    model = torch.compile(model)
-except Exception:
-    pass
 
 import re
+
+def normalize_category(cat: str) -> str:
+    cat = cat.strip().lower()
+    cat = re.sub(r"\s+", " ", cat)
+    cat = cat.replace("&", "and")
+    return cat
 
 def clean_category(text: str) -> str:
     text = text.strip().strip('"').strip("'")
@@ -112,9 +114,8 @@ def classify_reasoning_batch(questions):
             input_ids=input_ids,
             attention_mask=attention_mask,
             max_new_tokens=8,
-            do_sample=True,
-            temperature=0.15,
-            top_p=0.9,
+            do_sample=False,
+            temperature=0.0,
             repetition_penalty=1.1,
             pad_token_id=tokenizer.eos_token_id,
         )
@@ -127,6 +128,7 @@ def classify_reasoning_batch(questions):
     categories = []
     for text in decoded:
         category = clean_category(text)
+        category = normalize_category(category)
         categories.append(category)
 
     return categories
@@ -202,27 +204,27 @@ for ex in tqdm(ds["train"], desc="Classifying examples"):
         batch_assistants = []
         batch_negatives = []
 
-# process remainder
-for i in range(len(batch_inputs)):
-    category = classify_reasoning_batch([batch_inputs[i]])[0]
+# process remainder as a single batch
+if batch_inputs:
+    categories = classify_reasoning_batch(batch_inputs)
+    for i, category in enumerate(categories):
+        if next_concept_id < 100:
+            print(f"Example {next_concept_id}: {category}")
 
-    if next_concept_id < 100:
-        print(f"Example {next_concept_id}: {category}")
+        if category not in concept_map:
+            concept_map[category] = next_concept_id
+            next_concept_id += 1
 
-    if category not in concept_map:
-        concept_map[category] = next_concept_id
-        next_concept_id += 1
-
-    record = {
-        "input": batch_inputs[i],
-        "output": batch_assistants[i],
-        "output_negative": batch_negatives[i],
-        "output_concept": category,
-        "concept_genre": "positive",
-        "dataset_category": "instruction",
-        "concept_id": concept_map[category]
-    }
-    output_rows.append(record)
+        record = {
+            "input": batch_inputs[i],
+            "output": batch_assistants[i],
+            "output_negative": batch_negatives[i],
+            "output_concept": category,
+            "concept_genre": "positive",
+            "dataset_category": "instruction",
+            "concept_id": concept_map[category]
+        }
+        output_rows.append(record)
 
 # -----------------------------
 # Save Final Output
