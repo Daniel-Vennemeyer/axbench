@@ -3,8 +3,18 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-BATCH_SIZE = 6  # increase for better GPU utilization (adjust to 32 if memory allows)
-FIELD_BATCH_SIZE = 16  # tune: 8–32 depending on GPU memory
+BATCH_SIZE = 12          # doubles throughput, safe on 80GB
+FIELD_BATCH_SIZE = 32    # better kernel occupancy
+
+# Enable Flash/SDPA attention for higher throughput
+torch.backends.cuda.enable_flash_sdp(True)
+torch.backends.cuda.enable_mem_efficient_sdp(True)
+torch.backends.cuda.enable_math_sdp(False)
+
+# Ensure TF32 matmul precision is set high
+torch.set_float32_matmul_precision("high")
+
+#
 import json
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -539,8 +549,8 @@ def extract_user_and_assistant(messages):
 
 def run_worker(shard_id, num_shards):
     global args
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(shard_id)
-    torch.cuda.set_device(0)
+    # Bind this worker to its local CUDA device
+    torch.cuda.set_device(shard_id)
     args.shard_id = shard_id
     args.num_shards = num_shards
 
