@@ -34,6 +34,16 @@ model = AutoModelForCausalLM.from_pretrained(
 
 model.eval()
 
+from transformers import LogitsProcessor
+
+class ClosedSetLogitsProcessor(LogitsProcessor):
+    def __init__(self, allowed_token_ids):
+        self.allowed = set(allowed_token_ids)
+
+    def __call__(self, input_ids, scores):
+        mask = torch.full_like(scores, float("-inf"))
+        mask[:, list(self.allowed)] = 0.0
+        return scores + mask
 
 
 # -----------------------------
@@ -280,7 +290,14 @@ ALLOWED_FIELDS = [
 ]
 
 
+# Use the FIRST token of each field name
+ALLOWED_TOKEN_IDS = set()
+for field in ALLOWED_FIELDS:
+    tok = tokenizer(field, add_special_tokens=False)["input_ids"]
+    if len(tok) > 0:
+        ALLOWED_TOKEN_IDS.add(tok[0])
 
+LOGITS_PROCESSOR = ClosedSetLogitsProcessor(ALLOWED_TOKEN_IDS)
 
 import re
 
@@ -314,29 +331,41 @@ def is_valid_category(cat: str) -> bool:
 # Reasoning Category Prompt
 # -----------------------------
 
-CLASSIFICATION_PROMPT = """Question:
+CLASSIFICATION_PROMPT = """Classify the QUESTION into the single best matching FIELD from a predefined list.
+
+Rules:
+- Classify by subject matter only (not by "type of reasoning").
+- Output ONLY the field name (no extra words, no punctuation).
+- If none of the predefined fields apply, output: unknown
+
+QUESTION:
 {question}
 
-The academic field of this question is:"""
-
+FIELD:"""
 
 # -----------------------------
-# Score-based field classifier
+# Classification Function
 # -----------------------------
 
+
+# --- Efficient closed-set classification via batched log-likelihood scoring ---
 @torch.no_grad()
 def score_fields(questions):
     """
-    Return the best field for each question by computing
-    the conditional log-likelihood of each field label.
+    Efficient closed-set classification via batched log-likelihood scoring.
     """
     device = model.device
     results = []
 
+    # Pre-tokenize all field labels once
+    field_encodings = [
+        tokenizer(" " + f, add_special_tokens=False, return_tensors="pt")
+        for f in ALLOWED_FIELDS
+    ]
+
     for q in questions:
         prompt = CLASSIFICATION_PROMPT.format(question=q)
 
-        # Encode prompt once
         enc_prompt = tokenizer(
             prompt,
             return_tensors="pt",
@@ -344,50 +373,48 @@ def score_fields(questions):
             max_length=2048,
         ).to(device)
 
-        best_field = "unknown"
-        best_score = None
+        prompt_len = enc_prompt.input_ids.shape[1]
 
-        for field in ALLOWED_FIELDS:
-            # Score P(field | prompt)
-            enc_field = tokenizer(
-                " " + field,
-                return_tensors="pt",
-                add_special_tokens=False,
-            ).to(device)
+        # Build batch: prompt + each field
+        input_ids = []
+        attention_masks = []
+        field_token_lens = []
 
-            input_ids = torch.cat(
-                [enc_prompt.input_ids, enc_field.input_ids], dim=1
-            )
-            attention_mask = torch.ones_like(input_ids)
+        for fe in field_encodings:
+            ids = torch.cat([enc_prompt.input_ids, fe["input_ids"].to(device)], dim=1)
+            mask = torch.ones_like(ids)
+            input_ids.append(ids)
+            attention_masks.append(mask)
+            field_token_lens.append(fe["input_ids"].shape[1])
 
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            )
+        input_ids = torch.cat(input_ids, dim=0)
+        attention_masks = torch.cat(attention_masks, dim=0)
 
-            logits = outputs.logits[:, -enc_field.input_ids.shape[1]-1:-1, :]
-            log_probs = torch.log_softmax(logits, dim=-1)
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_masks,
+        )
 
+        logits = outputs.logits
+
+        scores = []
+        for i, field_len in enumerate(field_token_lens):
+            field_logits = logits[
+                i,
+                prompt_len - 1 : prompt_len - 1 + field_len,
+                :
+            ]
+            log_probs = torch.log_softmax(field_logits, dim=-1)
+            field_ids = field_encodings[i]["input_ids"].to(device)
             token_logprobs = log_probs.gather(
-                -1, enc_field.input_ids.unsqueeze(-1)
+                -1, field_ids.unsqueeze(-1)
             ).squeeze(-1)
+            scores.append(token_logprobs.sum().item())
 
-            score = token_logprobs.sum().item()
-
-            if best_score is None or score > best_score:
-                best_score = score
-                best_field = field
-
-        results.append(best_field)
+        best_idx = int(torch.tensor(scores).argmax())
+        results.append(ALLOWED_FIELDS[best_idx])
 
     return results
-
-# -----------------------------
-# Classification Function
-# -----------------------------
-
-def classify_reasoning_batch(questions):
-    return score_fields(questions)
 
 
 # -----------------------------
