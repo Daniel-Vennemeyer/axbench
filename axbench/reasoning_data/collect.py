@@ -84,7 +84,9 @@ The field name should be:
 Question:
 ''{question}''
 
-Return ONLY the field name:"""
+Return ONLY the field name.
+
+Field:"""
 
 # -----------------------------
 # Classification Function
