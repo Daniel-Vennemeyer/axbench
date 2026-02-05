@@ -31,6 +31,9 @@ parser.add_argument("--shard_id", type=int, default=0)
 parser.add_argument("--num_shards", type=int, default=1)
 args = parser.parse_args()
 
+# Explicit physical GPUs to use
+TARGET_GPUS = [4, 5]
+
 # -----------------------------
 # Paths
 # -----------------------------
@@ -549,12 +552,16 @@ def extract_user_and_assistant(messages):
 # Multiprocessing worker logic
 # -----------------------------
 
-def run_worker(shard_id, num_shards):
+def run_worker(local_rank, num_shards):
     global args
-    # Bind this worker to its local CUDA device
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(shard_id)
+
+    physical_gpu = TARGET_GPUS[local_rank]
+
+    # Restrict this process to a single physical GPU
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(physical_gpu)
     torch.cuda.set_device(0)
-    args.shard_id = shard_id
+
+    args.shard_id = local_rank
     args.num_shards = num_shards
 
     # -----------------------------
@@ -675,16 +682,14 @@ def run_worker(shard_id, num_shards):
 # -----------------------------
 
 if __name__ == "__main__":
-    num_gpus = torch.cuda.device_count()
-    if num_gpus >= 2:
-        print(f"Launching {num_gpus} workers (one per GPU)")
-        mp.set_start_method("spawn", force=True)
-        mp.spawn(
-            run_worker,
-            args=(num_gpus,),
-            nprocs=num_gpus,
-            join=True,
-        )
-    else:
-        print("Single GPU detected; running in single-process mode")
-        run_worker(0, 1)
+    num_workers = len(TARGET_GPUS)
+
+    print(f"Launching {num_workers} workers on GPUs {TARGET_GPUS}")
+
+    mp.set_start_method("spawn", force=True)
+    mp.spawn(
+        run_worker,
+        args=(num_workers,),
+        nprocs=num_workers,
+        join=True,
+    )
