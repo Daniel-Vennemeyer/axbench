@@ -3,8 +3,8 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-BATCH_SIZE = 12          # doubles throughput, safe on 80GB
-FIELD_BATCH_SIZE = 20    # better kernel occupancy
+BATCh_SIZE = 10          # doubles throughput, safe on 80GB
+FIELD_BATCH_SIZE = 12    # reduce to cap per-forward activation memory
 
 # Enable Flash/SDPA attention for higher throughput
 torch.backends.cuda.enable_flash_sdp(True)
@@ -492,10 +492,11 @@ def score_fields(questions):
             batch_attention_masks = torch.cat(attention_masks[start:end], dim=0)
             batch_field_lens = field_token_lens[start:end]
 
-            outputs = model(
-                input_ids=batch_input_ids,
-                attention_mask=batch_attention_masks,
-            )
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                outputs = model(
+                    input_ids=batch_input_ids,
+                    attention_mask=batch_attention_masks,
+                )
 
             batch_logits = outputs.logits
 
@@ -514,6 +515,7 @@ def score_fields(questions):
                 ).squeeze(-1)
 
                 scores.append(token_logprobs.sum().item())
+            torch.cuda.empty_cache()
 
         best_local = int(torch.tensor(scores).argmax())
         results.append(candidate_fields[best_local])
@@ -550,7 +552,8 @@ def extract_user_and_assistant(messages):
 def run_worker(shard_id, num_shards):
     global args
     # Bind this worker to its local CUDA device
-    torch.cuda.set_device(shard_id)
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(shard_id)
+    torch.cuda.set_device(0)
     args.shard_id = shard_id
     args.num_shards = num_shards
 
@@ -566,10 +569,11 @@ def run_worker(shard_id, num_shards):
 
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
-        device_map="auto",
+        device_map={"": 0},
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     )
+    model.to(torch.device("cuda:0"))
     model.eval()
 
     # Use the FIRST token of each field name (initialize per worker)
@@ -608,10 +612,10 @@ def run_worker(shard_id, num_shards):
         batch_assistants.append(assistant_output)
         batch_negatives.append(negative_output)
 
-        if len(batch_inputs) == BATCH_SIZE:
+        if len(batch_inputs) == BATCh_SIZE:
             # classify as batch
             categories = classify_reasoning_batch(batch_inputs)
-            for i in range(BATCH_SIZE):
+            for i in range(BATCh_SIZE):
                 category = categories[i]
                 if next_concept_id < 100:
                     print(f"Example {next_concept_id}: {category}")
